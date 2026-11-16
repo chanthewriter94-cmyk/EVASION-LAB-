@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { EnemySpeedMode, SimMode, SpawnMode } from '../simulation/EvasionEngine';
+import { EnemySpeedMode, FrozenRewardEntry, SimMode, SpawnMode } from '../simulation/EvasionEngine';
 import { ACTIVATION_OPTIONS, ActivationType } from '../simulation/NeuralNetwork';
+import { FrozenInfoPopover } from './FrozenInfoPopover';
 import { PWAInstallButton } from './PWAInstallButton';
 
 export type RewardCategory = 'spacing' | 'flow' | 'tactical';
@@ -65,6 +66,7 @@ interface ControlBarProps {
   onClearAllRewards: () => void;
   onToggleTurbo: () => void;
   isFrozen: boolean;
+  frozenRewards: FrozenRewardEntry[];
   onToggleFreeze: () => void;
   onPruneNetwork: () => void;
   onReversePrune: () => void;
@@ -106,6 +108,7 @@ export const ControlBar: React.FC<ControlBarProps> = ({
   onClearAllRewards,
   onToggleTurbo,
   isFrozen,
+  frozenRewards,
   onToggleFreeze,
   onPruneNetwork,
   onReversePrune,
@@ -315,19 +318,35 @@ export const ControlBar: React.FC<ControlBarProps> = ({
               Reverse Prune
             </button>
 
-            <button
-              id="btnFreeze"
-              type="button"
-              onClick={onToggleFreeze}
-              title="Freeze hidden layers, or click/drag a box on hidden neurons below"
-              className={`${
-                isFrozen
-                  ? 'bg-[#2a4b7c] border-[#5c94e0] text-[#e6f0ff] hover:bg-[#335a94]'
-                  : 'bg-[#222] border-[#444] text-[#eee] hover:bg-[#333]'
-              } border p-[4px] font-mono text-[12px] leading-normal cursor-pointer whitespace-nowrap`}
-            >
-              {isFrozen ? 'Frozen' : 'Freeze'}
-            </button>
+            <span className="inline-flex items-center">
+              <button
+                id="btnFreeze"
+                type="button"
+                onClick={onToggleFreeze}
+                title={
+                  isFrozen && frozenRewards.length > 0
+                    ? `Frozen with: ${frozenRewards.map((f) => f.rewards.join(', ')).join(' | ')} (click to unfreeze)`
+                    : 'Freeze hidden layers, or click/drag a box on hidden neurons below'
+                }
+                className={`${
+                  isFrozen
+                    ? 'bg-[#2a4b7c] border-[#5c94e0] text-[#e6f0ff] hover:bg-[#335a94]'
+                    : 'bg-[#222] border-[#444] text-[#eee] hover:bg-[#333]'
+                } border p-[4px] font-mono text-[12px] leading-normal cursor-pointer whitespace-nowrap`}
+              >
+                {isFrozen ? 'Frozen' : 'Freeze'}
+              </button>
+              {isFrozen && (
+                <FrozenInfoPopover
+                  frozenRewards={frozenRewards}
+                  label="?"
+                  buttonId="btnControlFrozenInfo"
+                  title="Click to inspect which reward(s) this network was frozen with"
+                  align="left"
+                  attachLeft
+                />
+              )}
+            </span>
 
             <button
               id="btnDownloadWeights"

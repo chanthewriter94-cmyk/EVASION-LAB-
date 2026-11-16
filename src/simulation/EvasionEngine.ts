@@ -98,10 +98,31 @@ export interface Player {
   vy: number;
 }
 
+export interface PhysicsSample {
+  step: number;
+  speedPx: number;
+  speedPct: number;
+  vxPx: number;
+  vyPx: number;
+  vxPct: number;
+  vyPct: number;
+  headingDeg: number;
+  isMoving: boolean;
+  accelPx: number;
+  accelPct: number;
+}
+
+export interface FrozenRewardEntry {
+  rewards: string[];
+  simMode: SimMode;
+  generation: number;
+}
+
 export class EvasionEngine {
   readonly playerSpeed = 3.5;
   readonly maxSteps = 18000; // 5 minutes at 60fps
   readonly popSize = 15;
+  readonly maxPhysicsHistory = 600;
 
   params: SimParams;
   enemySpeed: number;
@@ -116,6 +137,7 @@ export class EvasionEngine {
   currentFitness = 0;
   bestFitness = -Infinity;
   isFrozen = false;
+  frozenRewardEntries: FrozenRewardEntry[] = [];
   prevVx = 0;
   prevVy = 0;
   emaVx = 0;
@@ -124,6 +146,10 @@ export class EvasionEngine {
   emaPy = SIM_HEIGHT / 2;
   collectedSplitGaps: { pairKey: number; mx: number; my: number; step: number }[] = [];
   splitGapHistory: { angle: number; x: number; y: number }[] = [];
+  physicsHistory: PhysicsSample[] = [];
+  physicsVersion = 0;
+  private prevSpeedPx = 0;
+  private lastValidHeadingDeg = 0;
   restaurant: RestaurantState = createInitialRestaurantState();
   onStatsChange?: (statsText: string) => void;
 
@@ -242,7 +268,7 @@ export class EvasionEngine {
 
   resetSimulation(): void {
     const layers = Math.max(1, this.params.hiddenLayersCount || 1);
-    const neurons = Math.max(2, this.params.neuronsPerLayer || 16);
+    const neurons = Math.max(1, this.params.neuronsPerLayer || 16);
     const activation = this.params.activationType || 'tanh';
     this.params.hiddenLayersCount = layers;
     this.params.neuronsPerLayer = neurons;
@@ -258,6 +284,7 @@ export class EvasionEngine {
     this.bestFitness = -Infinity;
     this.bestAgent = null;
     this.isFrozen = false;
+    this.frozenRewardEntries = [];
     this.startEpisode();
     this.onStatsChange?.(
       this.params.simMode === 'restaurant'
@@ -305,6 +332,55 @@ export class EvasionEngine {
     this.emaPy = this.player.y;
     this.collectedSplitGaps = [];
     this.splitGapHistory = [];
+    this.physicsHistory = [];
+    this.prevSpeedPx = 0;
+    this.lastValidHeadingDeg = 0;
+    this.physicsVersion++;
+  }
+
+  clearPhysicsHistory(): void {
+    const currSpeed = Math.hypot(this.player.vx, this.player.vy);
+    this.physicsHistory = [];
+    this.prevSpeedPx = currSpeed;
+    this.physicsVersion++;
+  }
+
+  private recordPhysicsSample(): void {
+    const vxPx = this.player.vx;
+    const vyPx = this.player.vy;
+    const speedPx = Math.hypot(vxPx, vyPx);
+    const invMax = this.playerSpeed > 0 ? 1 / this.playerSpeed : 0;
+    const speedPct = speedPx * invMax * 100;
+    const vxPct = vxPx * invMax * 100;
+    const vyPct = vyPx * invMax * 100;
+    const isMoving = speedPx > 1e-3;
+    const headingDeg = isMoving
+      ? (Math.atan2(vyPx, vxPx) * 180) / Math.PI
+      : this.lastValidHeadingDeg;
+    if (isMoving) {
+      this.lastValidHeadingDeg = headingDeg;
+    }
+    const accelPx = this.physicsHistory.length === 0 ? 0 : speedPx - this.prevSpeedPx;
+    const accelPct = accelPx * invMax * 100;
+    this.prevSpeedPx = speedPx;
+
+    this.physicsHistory.push({
+      step: this.stepCount,
+      speedPx,
+      speedPct,
+      vxPx,
+      vyPx,
+      vxPct,
+      vyPct,
+      headingDeg,
+      isMoving,
+      accelPx,
+      accelPct,
+    });
+    if (this.physicsHistory.length > this.maxPhysicsHistory) {
+      this.physicsHistory.shift();
+    }
+    this.physicsVersion++;
   }
 
   private computeSplitGapAngle(activeEnemies: Enemy[]): number | null {
@@ -401,6 +477,8 @@ export class EvasionEngine {
 
     this.player.x = Math.max(6, Math.min(SIM_WIDTH - 6, this.player.x));
     this.player.y = Math.max(6, Math.min(SIM_HEIGHT - 6, this.player.y));
+
+    this.recordPhysicsSample();
 
     if (this.params.simMode === 'restaurant') {
       resolvePlayerObstacles(this.player);
@@ -1883,6 +1961,11 @@ export class EvasionEngine {
     }
 
     this.isFrozen = this.agent.hasFrozenWeights();
+    if (nextFrozen) {
+      this.recordFrozenRewardContext(false);
+    } else if (!this.isFrozen) {
+      this.frozenRewardEntries = [];
+    }
     return {
       isFrozen: this.isFrozen,
       canPrune: this.canPrune(),
@@ -1934,6 +2017,11 @@ export class EvasionEngine {
     }
 
     this.isFrozen = this.agent.hasFrozenWeights();
+    if (shouldFreeze) {
+      this.recordFrozenRewardContext(false);
+    } else if (!this.isFrozen) {
+      this.frozenRewardEntries = [];
+    }
     return {
       changed: true,
       isFrozen: this.isFrozen,
@@ -2211,6 +2299,76 @@ export class EvasionEngine {
     };
   }
 
+  getActiveRewardDescriptions(): string[] {
+    const p = this.params;
+    if (p.simMode === 'restaurant') {
+      return ['Restaurant Mode (Fixed)'];
+    }
+    const items: { flag: boolean; label: string; weight: number }[] = [
+      { flag: p.rewardHit, label: 'Hit', weight: p.weightHit },
+      { flag: p.rewardEnemyDist, label: 'EnemyDist', weight: p.weightEnemyDist },
+      { flag: p.rewardWallDist, label: 'WallDist', weight: p.weightWallDist },
+      { flag: p.rewardGroupEnemies, label: 'GroupEnemies', weight: p.weightGroupEnemies },
+      { flag: p.rewardSpreadEnemies, label: 'SpreadEnemies', weight: p.weightSpreadEnemies },
+      { flag: p.rewardEdgeEnemies, label: 'EdgeEnemies', weight: p.weightEdgeEnemies },
+      { flag: p.rewardAvgEnemyCenter, label: 'AvgEnemyCenter', weight: p.weightAvgEnemyCenter },
+      { flag: p.rewardOppHeading, label: 'OppHeading', weight: p.weightOppHeading },
+      { flag: p.rewardSmoothVel, label: 'SmoothVel', weight: p.weightSmoothVel },
+      { flag: p.rewardSplitGap, label: 'SplitGap', weight: p.weightSplitGap },
+      { flag: p.rewardSplitGapCollect, label: 'SplitGapCollect', weight: p.weightSplitGapCollect },
+      { flag: p.rewardSplitGapPredict, label: 'SplitGapPredict', weight: p.weightSplitGapPredict },
+      { flag: p.rewardOpenCorridor, label: 'OpenCorridor', weight: p.weightOpenCorridor },
+      { flag: p.rewardFarWallSense, label: 'FarWallSense', weight: p.weightFarWallSense },
+      { flag: p.rewardEdgeSense, label: 'EdgeSense', weight: p.weightEdgeSense },
+      { flag: p.rewardOrbitKite, label: 'OrbitKite', weight: p.weightOrbitKite },
+      { flag: p.rewardMatadorCut, label: 'MatadorCut', weight: p.weightMatadorCut },
+      { flag: p.rewardAnkleBreaker, label: 'AnkleBreaker', weight: p.weightAnkleBreaker },
+      { flag: p.rewardPincerEscape, label: 'PincerEscape', weight: p.weightPincerEscape },
+      { flag: p.rewardWallSlingshot, label: 'WallSlingshot', weight: p.weightWallSlingshot },
+      { flag: p.rewardPackTangle, label: 'PackTangle', weight: p.weightPackTangle },
+      { flag: p.rewardSpideySense, label: 'SpideySense', weight: p.weightSpideySense },
+      { flag: p.rewardVectorStabbing, label: 'VectorStabbing', weight: p.weightVectorStabbing },
+      { flag: p.rewardTwitch, label: 'Twitch', weight: p.weightTwitch },
+    ];
+    const active = items
+      .filter((it) => it.flag)
+      .map((it) => `${it.weight >= 0 ? '+' : '-'}${it.label} (${Math.abs(it.weight)})`);
+    return active.length > 0 ? active : ['Survival only (no rewards)'];
+  }
+
+  private recordFrozenRewardContext(replaceExisting: boolean): void {
+    const entry: FrozenRewardEntry = {
+      rewards: this.getActiveRewardDescriptions(),
+      simMode: this.params.simMode,
+      generation: this.generation,
+    };
+    if (replaceExisting || this.frozenRewardEntries.length === 0) {
+      this.frozenRewardEntries = [entry];
+      return;
+    }
+    const key = `${entry.simMode}|${entry.rewards.join('|')}`;
+    const alreadyExists = this.frozenRewardEntries.some(
+      (e) => `${e.simMode}|${e.rewards.join('|')}` === key
+    );
+    if (!alreadyExists) {
+      this.frozenRewardEntries = [...this.frozenRewardEntries, entry];
+    }
+  }
+
+  getFrozenRewardsSummary(): FrozenRewardEntry[] {
+    return this.frozenRewardEntries.map((e) => ({
+      ...e,
+      rewards: [...e.rewards],
+    }));
+  }
+
+  getMinimumArchitectureBounds(): { minLayers: number; minNeurons: number } {
+    if (!this.agent || !this.isFrozen) {
+      return { minLayers: 1, minNeurons: 1 };
+    }
+    return this.agent.getMinimumFrozenDimensions();
+  }
+
   setFrozen(frozen: boolean): { isFrozen: boolean; canPrune: boolean } {
     this.isFrozen = frozen;
     for (const net of this.population) {
@@ -2220,6 +2378,11 @@ export class EvasionEngine {
     if (this.bestAgent) {
       if (frozen) this.bestAgent.freezeHiddenAll();
       else this.bestAgent.unfreezeAll();
+    }
+    if (frozen) {
+      this.recordFrozenRewardContext(true);
+    } else {
+      this.frozenRewardEntries = [];
     }
     return {
       isFrozen: this.isFrozen,
@@ -2251,7 +2414,7 @@ export class EvasionEngine {
 
     const frozenBounds = this.isFrozen
       ? this.agent.getMinimumFrozenDimensions()
-      : { minLayers: 1, minNeurons: 2 };
+      : { minLayers: 1, minNeurons: 1 };
     const clampedLayers = Math.min(5, Math.max(frozenBounds.minLayers, targetLayers));
     const clampedNeurons = Math.min(64, Math.max(frozenBounds.minNeurons, targetNeurons));
 
@@ -2324,6 +2487,7 @@ export class EvasionEngine {
       frozenBiases: JSON.parse(JSON.stringify(source.frozenBiases)) as boolean[][],
       frozenHiddenNodes: source.getFrozenHiddenMask(),
       isFrozen: this.isFrozen,
+      frozenRewards: this.getFrozenRewardsSummary(),
       params: { ...this.params },
       simulationState: {
         popIndex: this.popIndex,
@@ -2708,6 +2872,12 @@ export class EvasionEngine {
           }
 
           restoredExactState = true;
+          const restoredSpeed = Math.hypot(this.player.vx, this.player.vy);
+          this.physicsHistory = [];
+          this.prevSpeedPx = restoredSpeed;
+          this.lastValidHeadingDeg =
+            restoredSpeed > 1e-3 ? (Math.atan2(this.player.vy, this.player.vx) * 180) / Math.PI : 0;
+          this.physicsVersion++;
         }
       }
     }
@@ -2732,6 +2902,42 @@ export class EvasionEngine {
     }
 
     this.isFrozen = Boolean(this.agent?.hasFrozenWeights());
+    if (this.isFrozen) {
+      const rawFrozenRewards = record.frozenRewards;
+      const restoredEntries: FrozenRewardEntry[] = [];
+      if (Array.isArray(rawFrozenRewards)) {
+        for (const item of rawFrozenRewards) {
+          if (item && typeof item === 'object') {
+            const rec = item as Record<string, unknown>;
+            const rewardsList = Array.isArray(rec.rewards)
+              ? rec.rewards.filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
+              : [];
+            if (rewardsList.length > 0) {
+              restoredEntries.push({
+                rewards: rewardsList,
+                simMode: rec.simMode === 'restaurant' ? 'restaurant' : 'evasion',
+                generation:
+                  typeof rec.generation === 'number' && Number.isFinite(rec.generation)
+                    ? Math.max(1, Math.floor(rec.generation))
+                    : generation,
+              });
+            }
+          }
+        }
+      }
+      this.frozenRewardEntries =
+        restoredEntries.length > 0
+          ? restoredEntries
+          : [
+              {
+                rewards: this.getActiveRewardDescriptions(),
+                simMode: this.params.simMode,
+                generation,
+              },
+            ];
+    } else {
+      this.frozenRewardEntries = [];
+    }
     const actualHiddenSizes = this.getHiddenLayerSizes();
     this.params.hiddenLayersCount = actualHiddenSizes.length;
     if (actualHiddenSizes.length > 0) {

@@ -342,7 +342,7 @@ export class NeuralNetwork {
 
   getMinimumFrozenDimensions(): { minLayers: number; minNeurons: number } {
     let minLayers = 1;
-    let minNeurons = 2;
+    let minNeurons = 1;
     for (let h = 0; h < this.weights.length - 1; h++) {
       let frozenInLayer = 0;
       for (let i = 0; i < this.weights[h].length; i++) {
@@ -425,7 +425,7 @@ export class NeuralNetwork {
             }
           }
         }
-      } else if (targetNeurons < oldCount && !freezeExisting) {
+      } else if (targetNeurons < oldCount) {
         while (this.weights[h].length > targetNeurons && this.weights[h].length > 1) {
           const pruned = this.pruneNode('least', h);
           if (!pruned) break;
@@ -452,7 +452,10 @@ export class NeuralNetwork {
       this.biases.push(this.randomVector(2));
       this.frozenWeights.push(this.boolMatrix(2, prevSize, false));
       this.frozenBiases.push(this.boolVector(2, false));
-    } else if (targetHiddenLayers < oldHiddenCount && !freezeExisting) {
+    } else if (
+      targetHiddenLayers < oldHiddenCount &&
+      (!freezeExisting || targetHiddenLayers >= this.getMinimumFrozenDimensions().minLayers)
+    ) {
       const outW = this.weights.pop()!;
       const outB = this.biases.pop()!;
       const outFW = this.frozenWeights.pop()!;

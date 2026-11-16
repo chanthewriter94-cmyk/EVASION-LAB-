@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ControlBar, RewardConfigItem } from './components/ControlBar';
 import { DemoLibraryPanel } from './components/DemoLibraryPanel';
+import { FrozenInfoPopover } from './components/FrozenInfoPopover';
 import { HumanDemoOverlay } from './components/HumanDemoOverlay';
 import { LossLandscapePanel } from './components/LossLandscapePanel';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { PhysicsChartsPanel } from './components/PhysicsChartsPanel';
 import { WeightInspector } from './components/WeightInspector';
 import {
   createDemoBundlePayload,
@@ -17,6 +19,7 @@ import {
 import {
   EnemySpeedMode,
   EvasionEngine,
+  FrozenRewardEntry,
   NN_HEIGHT,
   NN_WIDTH,
   SIM_HEIGHT,
@@ -336,8 +339,13 @@ export default function App() {
   const [statsText, setStatsText] = useState<string>('0 | 0 | 0');
   const [canPrune, setCanPrune] = useState<boolean>(true);
   const [isFrozen, setIsFrozen] = useState<boolean>(false);
+  const [frozenRewards, setFrozenRewards] = useState<FrozenRewardEntry[]>([]);
+  const [minArchBounds, setMinArchBounds] = useState<{ minLayers: number; minNeurons: number }>({
+    minLayers: 1,
+    minNeurons: 1,
+  });
   const [nnCursor, setNnCursor] = useState<'default' | 'pointer' | 'crosshair'>('default');
-  const [bottomTab, setBottomTab] = useState<'nn' | 'weights' | 'landscape' | null>('nn');
+  const [bottomTab, setBottomTab] = useState<'nn' | 'weights' | 'landscape' | 'physics' | null>('nn');
   const [inspectorTick, setInspectorTick] = useState<number>(0);
   const [showRecorderSuite, setShowRecorderSuite] = useState<boolean>(false);
   const [recNeuralNet, setRecNeuralNet] = useState<boolean>(true);
@@ -527,6 +535,13 @@ export default function App() {
     startFreshLandscapeScan,
   ]);
 
+  const syncFreezeAndBounds = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    setFrozenRewards(engine.getFrozenRewardsSummary());
+    setMinArchBounds(engine.getMinimumArchitectureBounds());
+  }, []);
+
   const handleReset = useCallback(() => {
     if (!engineRef.current) return;
     engineRef.current.resetSimulation();
@@ -535,12 +550,13 @@ export default function App() {
     setHiddenLayerSizes(engineRef.current.getHiddenLayerSizes());
     setIsFrozen(false);
     setCanPrune(engineRef.current.canPrune());
+    syncFreezeAndBounds();
     setInspectorTick((t) => t + 1);
     weightScannerRef.current = null;
     if (bottomTab === 'landscape' || (isRecording && recLossLandscape)) {
       startFreshLandscapeScan();
     }
-  }, [bottomTab, isRecording, recLossLandscape, startFreshLandscapeScan]);
+  }, [bottomTab, isRecording, recLossLandscape, startFreshLandscapeScan, syncFreezeAndBounds]);
 
   const handleToggleFreeze = useCallback(() => {
     if (!engineRef.current) return;
@@ -548,16 +564,21 @@ export default function App() {
     const res = engineRef.current.setFrozen(next);
     setIsFrozen(res.isFrozen);
     setCanPrune(res.canPrune);
+    syncFreezeAndBounds();
     setInspectorTick((t) => t + 1);
-  }, []);
+  }, [syncFreezeAndBounds]);
 
-  const handleToggleInspectorNodeFreeze = useCallback((hiddenLayer: number, nodeIndex: number) => {
-    if (!engineRef.current) return;
-    const res = engineRef.current.toggleHiddenNodeFreeze(hiddenLayer, nodeIndex);
-    setIsFrozen(res.isFrozen);
-    setCanPrune(res.canPrune);
-    setInspectorTick((t) => t + 1);
-  }, []);
+  const handleToggleInspectorNodeFreeze = useCallback(
+    (hiddenLayer: number, nodeIndex: number) => {
+      if (!engineRef.current) return;
+      const res = engineRef.current.toggleHiddenNodeFreeze(hiddenLayer, nodeIndex);
+      setIsFrozen(res.isFrozen);
+      setCanPrune(res.canPrune);
+      syncFreezeAndBounds();
+      setInspectorTick((t) => t + 1);
+    },
+    [syncFreezeAndBounds]
+  );
 
   const handleStartRecording = useCallback(() => {
     if (!engineRef.current || isRecording) return;
@@ -638,17 +659,19 @@ export default function App() {
           const res = engineRef.current.toggleHiddenNodeFreeze(hit.hiddenLayer, hit.nodeIndex);
           setIsFrozen(res.isFrozen);
           setCanPrune(res.canPrune);
+          syncFreezeAndBounds();
         }
       } else {
         const res = engineRef.current.toggleHiddenNodesInRect(box.x1, box.y1, endX, endY);
         if (res.changed) {
           setIsFrozen(res.isFrozen);
           setCanPrune(res.canPrune);
+          syncFreezeAndBounds();
         }
       }
       setNnCursor(pt && engineRef.current.findHiddenNodeAt(pt.x, pt.y) ? 'pointer' : 'default');
     },
-    [getNNCanvasPoint]
+    [getNNCanvasPoint, syncFreezeAndBounds]
   );
 
   useEffect(() => {
@@ -665,35 +688,43 @@ export default function App() {
     };
   }, [finishNNDrag]);
 
-  const handleLayersChange = useCallback((val: number) => {
-    const clamped = Math.min(5, Math.max(1, val));
-    if (!engineRef.current) return;
-    const resized = engineRef.current.resizeNetwork(
-      clamped,
-      engineRef.current.params.neuronsPerLayer,
-      engineRef.current.params.activationType
-    );
-    setLayers(resized.layers);
-    setNeurons(resized.neurons);
-    setHiddenLayerSizes(resized.hiddenLayerSizes);
-    setCanPrune(resized.canPrune);
-    setInspectorTick((t) => t + 1);
-  }, []);
+  const handleLayersChange = useCallback(
+    (val: number) => {
+      const clamped = Math.min(5, Math.max(1, val));
+      if (!engineRef.current) return;
+      const resized = engineRef.current.resizeNetwork(
+        clamped,
+        engineRef.current.params.neuronsPerLayer,
+        engineRef.current.params.activationType
+      );
+      setLayers(resized.layers);
+      setNeurons(resized.neurons);
+      setHiddenLayerSizes(resized.hiddenLayerSizes);
+      setCanPrune(resized.canPrune);
+      syncFreezeAndBounds();
+      setInspectorTick((t) => t + 1);
+    },
+    [syncFreezeAndBounds]
+  );
 
-  const handleNeuronsChange = useCallback((val: number) => {
-    const clamped = Math.min(64, Math.max(2, val));
-    if (!engineRef.current) return;
-    const resized = engineRef.current.resizeNetwork(
-      engineRef.current.params.hiddenLayersCount,
-      clamped,
-      engineRef.current.params.activationType
-    );
-    setLayers(resized.layers);
-    setNeurons(resized.neurons);
-    setHiddenLayerSizes(resized.hiddenLayerSizes);
-    setCanPrune(resized.canPrune);
-    setInspectorTick((t) => t + 1);
-  }, []);
+  const handleNeuronsChange = useCallback(
+    (val: number) => {
+      const clamped = Math.min(64, Math.max(1, val));
+      if (!engineRef.current) return;
+      const resized = engineRef.current.resizeNetwork(
+        engineRef.current.params.hiddenLayersCount,
+        clamped,
+        engineRef.current.params.activationType
+      );
+      setLayers(resized.layers);
+      setNeurons(resized.neurons);
+      setHiddenLayerSizes(resized.hiddenLayerSizes);
+      setCanPrune(resized.canPrune);
+      syncFreezeAndBounds();
+      setInspectorTick((t) => t + 1);
+    },
+    [syncFreezeAndBounds]
+  );
 
   const handlePruneNetwork = useCallback(() => {
     if (!engineRef.current) return;
@@ -707,8 +738,9 @@ export default function App() {
       setNeurons(Math.max(...result.hiddenLayerSizes));
     }
     setCanPrune(result.canPruneMore);
+    syncFreezeAndBounds();
     setInspectorTick((t) => t + 1);
-  }, []);
+  }, [syncFreezeAndBounds]);
 
   const handleReversePrune = useCallback(() => {
     if (!engineRef.current) return;
@@ -722,8 +754,9 @@ export default function App() {
       setNeurons(Math.max(...result.hiddenLayerSizes));
     }
     setCanPrune(result.canPruneMore);
+    syncFreezeAndBounds();
     setInspectorTick((t) => t + 1);
-  }, []);
+  }, [syncFreezeAndBounds]);
 
   const handleDownloadWeights = useCallback(() => {
     const payload = engineRef.current?.exportWeightsPayload();
@@ -765,6 +798,7 @@ export default function App() {
     setTurboMode(p.turboMode);
     setCanPrune(result.canPrune);
     setIsFrozen(result.isFrozen);
+    syncFreezeAndBounds();
 
     const restoredRewards: RewardConfigItem[] = [
       {
@@ -996,13 +1030,14 @@ export default function App() {
       engineRef.current.setSimMode(mode);
       setIsFrozen(false);
       setCanPrune(engineRef.current.canPrune());
+      syncFreezeAndBounds();
       setInspectorTick((t) => t + 1);
       weightScannerRef.current = null;
       if (bottomTab === 'landscape' || (isRecording && recLossLandscape)) {
         startFreshLandscapeScan();
       }
     },
-    [bottomTab, isRecording, recLossLandscape, startFreshLandscapeScan]
+    [bottomTab, isRecording, recLossLandscape, startFreshLandscapeScan, syncFreezeAndBounds]
   );
 
   const handleActivationChange = useCallback((val: ActivationType) => {
@@ -1329,11 +1364,14 @@ export default function App() {
         batchSize: 64,
       });
       engineRef.current.applyTrainedAgent(network, config.seedPopulation);
+      setIsFrozen(engineRef.current.isFrozen);
+      setCanPrune(engineRef.current.canPrune());
+      syncFreezeAndBounds();
       setInspectorTick((t) => t + 1);
       weightScannerRef.current = null;
       return result;
     },
-    [humanDemos]
+    [humanDemos, syncFreezeAndBounds]
   );
 
   return (
@@ -1361,6 +1399,7 @@ export default function App() {
         onClearAllRewards={handleClearAllRewards}
         onToggleTurbo={handleToggleTurbo}
         isFrozen={isFrozen}
+        frozenRewards={frozenRewards}
         onToggleFreeze={handleToggleFreeze}
         onPruneNetwork={handlePruneNetwork}
         onReversePrune={handleReversePrune}
@@ -1432,6 +1471,20 @@ export default function App() {
               Loss Landscape {bottomTab === 'landscape' ? '▾' : '▸'}
             </button>
             <button
+              id="tabPhysics"
+              type="button"
+              onClick={() => {
+                dragBoxRef.current = null;
+                setNnCursor('default');
+                setBottomTab((prev) => (prev === 'physics' ? null : 'physics'));
+              }}
+              className={`${
+                bottomTab === 'physics' ? 'bg-[#066]' : 'bg-[#222] hover:bg-[#333]'
+              } text-[#eee] border border-[#444] px-[6px] py-[3px] font-mono text-[12px] leading-normal cursor-pointer whitespace-nowrap`}
+            >
+              Physics {bottomTab === 'physics' ? '▾' : '▸'}
+            </button>
+            <button
               id="tabRecSuite"
               type="button"
               onClick={() => {
@@ -1457,13 +1510,23 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-[8px] font-mono text-[12px]">
+            {isFrozen && (
+              <FrozenInfoPopover
+                frozenRewards={frozenRewards}
+                label="Frozen"
+                buttonId="btnBottomFrozenInfo"
+                title="Click to see which reward(s) this network was frozen with"
+                align="right"
+              />
+            )}
+
             <span className="inline-flex items-center">
               <span className="mr-[4px] text-[#bbb]">L:</span>
               <span className="inline-flex items-center border border-[#444] bg-[#222]">
                 <button
                   id="btnDecLayers"
                   type="button"
-                  disabled={layers <= (isFrozen ? layers : 1)}
+                  disabled={layers <= minArchBounds.minLayers}
                   onClick={() => handleLayersChange(layers - 1)}
                   title="Decrease hidden layers"
                   className="bg-[#222] hover:bg-[#333] text-[#eee] border-none px-[7px] py-[2px] font-mono text-[12px] leading-normal cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
@@ -1495,7 +1558,7 @@ export default function App() {
                 <button
                   id="btnDecNeurons"
                   type="button"
-                  disabled={neurons <= (isFrozen ? neurons : 2)}
+                  disabled={neurons <= minArchBounds.minNeurons}
                   onClick={() => handleNeuronsChange(neurons - 1)}
                   title="Decrease nodes per layer"
                   className="bg-[#222] hover:bg-[#333] text-[#eee] border-none px-[7px] py-[2px] font-mono text-[12px] leading-normal cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
@@ -1677,6 +1740,10 @@ export default function App() {
               .map((r) => `${r.isPositive ? '+' : '-'}${r.weightText} ${r.label.replace(/^[+-]/, '')}`)}
             onRescan={() => startFreshLandscapeScan()}
           />
+        )}
+
+        {bottomTab === 'physics' && engineRef.current && (
+          <PhysicsChartsPanel engine={engineRef.current} />
         )}
       </div>
 
