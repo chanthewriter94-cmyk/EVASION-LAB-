@@ -1,8 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { EvasionEngine, PhysicsSample } from '../simulation/EvasionEngine';
+import { AgentId, EvasionEngine, PhysicsSample } from '../simulation/EvasionEngine';
+import { BRAIN_UI_STYLES } from './brainStyles';
 
 interface PhysicsChartsPanelProps {
   engine: EvasionEngine;
+  agentId?: AgentId;
+  dualAgentMode?: boolean;
+  splitBrainMode?: boolean;
+  activeBrainIds?: AgentId[];
+  onSelectAgent?: (id: AgentId) => void;
 }
 
 type WindowSize = 150 | 300 | 600;
@@ -146,16 +152,21 @@ function drawPhysicsCanvas(
 
   // 1. SPEED BAND
   const b0 = BANDS[0];
+  let maxSpeedSeen = 100;
+  for (let i = 0; i < count; i++) {
+    if (samples[i].speedPct > maxSpeedSeen) maxSpeedSeen = samples[i].speedPct;
+  }
+  const speedScalePct = maxSpeedSeen > 103 ? 150 : 100;
   drawBandFrame(
     ctx,
     b0.y,
     b0.h,
     b0.title,
-    '100%',
-    '50%',
+    `${speedScalePct}%`,
+    `${speedScalePct / 2}%`,
     '0%',
-    playerSpeed.toFixed(2),
-    (playerSpeed * 0.5).toFixed(2),
+    ((playerSpeed * speedScalePct) / 100).toFixed(2),
+    ((playerSpeed * speedScalePct) / 200).toFixed(2),
     '0.00'
   );
   drawVerticalGrid(b0.y, b0.h);
@@ -165,8 +176,8 @@ function drawPhysicsCanvas(
   const speedInnerH = b0.h - speedPadT - speedPadB;
   const speedBaseY = b0.y + b0.h - speedPadB;
   const yForSpeed = (pct: number) => {
-    const clamped = Math.max(0, Math.min(100, pct));
-    return speedBaseY - (clamped / 100) * speedInnerH;
+    const clamped = Math.max(0, Math.min(speedScalePct, pct));
+    return speedBaseY - (clamped / speedScalePct) * speedInnerH;
   };
 
   if (count >= 1) {
@@ -474,14 +485,28 @@ function drawPhysicsCanvas(
   }
 }
 
-export const PhysicsChartsPanel: React.FC<PhysicsChartsPanelProps> = ({ engine }) => {
+export const PhysicsChartsPanel: React.FC<PhysicsChartsPanelProps> = ({
+  engine,
+  agentId = 'A',
+  dualAgentMode = false,
+  splitBrainMode = false,
+  activeBrainIds,
+  onSelectAgent,
+}) => {
+  const resolvedIds = activeBrainIds ?? engine.getActiveBrainIds();
+  const hasTwoBrains = resolvedIds.length > 1 || dualAgentMode || splitBrainMode;
+  const targetId: AgentId = hasTwoBrains
+    ? resolvedIds.includes(agentId)
+      ? agentId
+      : resolvedIds[0] ?? 'A'
+    : 'A';
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [windowSize, setWindowSize] = useState<WindowSize>(300);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const [readoutSample, setReadoutSample] = useState<PhysicsSample | null>(() => {
-    const len = engine.physicsHistory.length;
-    return len > 0 ? engine.physicsHistory[len - 1] : null;
+    const hist = engine.getTargetPhysicsHistory(targetId);
+    return hist.length > 0 ? hist[hist.length - 1] : null;
   });
   const [episodeMeta, setEpisodeMeta] = useState<{ gen: number; step: number }>({
     gen: engine.generation,
@@ -492,11 +517,20 @@ export const PhysicsChartsPanel: React.FC<PhysicsChartsPanelProps> = ({ engine }
   const lastDrawnKeyRef = useRef<string>('');
   const lastUiSyncRef = useRef<number>(0);
 
+  useEffect(() => {
+    pausedSnapshotRef.current = [];
+    setIsPaused(false);
+    setHoverIdx(null);
+    lastDrawnKeyRef.current = '';
+    const hist = engine.getTargetPhysicsHistory(targetId);
+    setReadoutSample(hist.length > 0 ? hist[hist.length - 1] : null);
+  }, [engine, targetId]);
+
   const getDisplayedSamples = useCallback((): PhysicsSample[] => {
-    const source = isPaused ? pausedSnapshotRef.current : engine.physicsHistory;
+    const source = isPaused ? pausedSnapshotRef.current : engine.getTargetPhysicsHistory(targetId);
     if (source.length <= windowSize) return source;
     return source.slice(source.length - windowSize);
-  }, [engine, isPaused, windowSize]);
+  }, [engine, isPaused, windowSize, targetId]);
 
   useEffect(() => {
     let rafId = 0;
@@ -507,7 +541,7 @@ export const PhysicsChartsPanel: React.FC<PhysicsChartsPanelProps> = ({ engine }
           ? Math.max(0, Math.min(samples.length - 1, hoverIdx))
           : null;
 
-      const drawKey = `${isPaused ? 'P' : engine.physicsVersion}|${windowSize}|${validHover ?? 'N'}|${samples.length}`;
+      const drawKey = `${targetId}|${isPaused ? 'P' : engine.physicsVersion}|${windowSize}|${validHover ?? 'N'}|${samples.length}`;
       if (drawKey !== lastDrawnKeyRef.current) {
         const ctx = canvasRef.current?.getContext('2d');
         if (ctx) {
@@ -534,11 +568,11 @@ export const PhysicsChartsPanel: React.FC<PhysicsChartsPanelProps> = ({ engine }
 
     rafId = requestAnimationFrame(renderLoop);
     return () => cancelAnimationFrame(rafId);
-  }, [engine, getDisplayedSamples, hoverIdx, isPaused, windowSize]);
+  }, [engine, getDisplayedSamples, hoverIdx, isPaused, windowSize, targetId]);
 
   const handleTogglePause = () => {
     if (!isPaused) {
-      pausedSnapshotRef.current = engine.physicsHistory.slice();
+      pausedSnapshotRef.current = engine.getTargetPhysicsHistory(targetId).slice();
       setIsPaused(true);
     } else {
       pausedSnapshotRef.current = [];
@@ -594,11 +628,33 @@ export const PhysicsChartsPanel: React.FC<PhysicsChartsPanelProps> = ({ engine }
   return (
     <div
       id="physicsChartsPanel"
-      className="w-[95%] max-w-[570px] mx-auto bg-[#0a0a0a] border border-[#333] p-[8px] font-mono text-[11px] text-[#ddd]"
+      className="w-full bg-[#0a0a0a] border border-[#2a2a2a] p-[8px] font-mono text-[11px] text-[#ddd] overflow-hidden"
     >
       {/* Toolbar */}
       <div className="flex items-center justify-between gap-[6px] flex-wrap mb-[6px]">
         <div className="flex items-center gap-[4px] flex-wrap">
+          {hasTwoBrains && onSelectAgent && (
+            <>
+              <span className="inline-flex border border-[#3a3a3a]">
+                {resolvedIds.map((id, idx) => (
+                  <button
+                    key={id}
+                    type="button"
+                    title={`${splitBrainMode ? 'Brain' : 'Agent'} ${id} (${BRAIN_UI_STYLES[id].colorName})`}
+                    onClick={() => onSelectAgent(id)}
+                    className={`${
+                      targetId === id
+                        ? BRAIN_UI_STYLES[id].activeTabClass
+                        : 'bg-[#161616] text-[#999] hover:bg-[#242424]'
+                    } border-none ${idx > 0 ? 'border-l border-[#3a3a3a]' : ''} px-[6px] py-[2px] font-mono text-[10px] cursor-pointer whitespace-nowrap`}
+                  >
+                    {resolvedIds.length > 2 ? id : `${splitBrainMode ? 'Brain' : 'Agent'} ${id}`}
+                  </button>
+                ))}
+              </span>
+              <span className="text-[#444] mx-[1px]">|</span>
+            </>
+          )}
           <button
             id="btnPhysicsPause"
             type="button"
@@ -642,6 +698,11 @@ export const PhysicsChartsPanel: React.FC<PhysicsChartsPanelProps> = ({ engine }
         </div>
 
         <div className="text-[10px] text-[#888] tabular-nums whitespace-nowrap">
+          {hasTwoBrains && (
+            <span className={`${BRAIN_UI_STYLES[targetId].textClass} mr-[6px]`}>
+              [{splitBrainMode ? `Brain ${targetId} Intent` : `Agent ${targetId}`}]
+            </span>
+          )}
           {isInspecting && displayed
             ? `Inspecting Step ${displayed.step}`
             : `${isPaused ? 'Paused' : 'Live'} · Gen ${episodeMeta.gen} · Step ${episodeMeta.step}`}
@@ -724,12 +785,46 @@ export const PhysicsChartsPanel: React.FC<PhysicsChartsPanelProps> = ({ engine }
         className="w-full h-auto block bg-[#050505] border border-[#262626] select-none touch-none cursor-crosshair"
       />
 
-      <div className="mt-[5px] flex items-center justify-between gap-[8px] flex-wrap text-[10px] text-[#888] tabular-nums">
-        <span>
-          Hover charts to scrub synchronized step · Max {engine.playerSpeed.toFixed(2)} px/step (100%)
-        </span>
-        <span>Current episode rolling window</span>
-      </div>
+      {(() => {
+        const outCfg = engine.getOutputConfig(targetId);
+        const motor = engine.getAgentMotorState(targetId);
+        const stamina = motor.stamina;
+        const sprinting = motor.sprinting;
+        const headingRad = motor.headingRad;
+        const auxVal = motor.aux;
+        return (
+          <div className="mt-[5px] flex items-center justify-between gap-[8px] flex-wrap text-[10px] text-[#888] tabular-nums">
+            <span>
+              Hover charts to scrub · Base {engine.playerSpeed.toFixed(2)} px/step (100%)
+              {outCfg === 'sprint_burst'
+                ? ` · Stamina ${(stamina * 100).toFixed(0)}%${sprinting ? ' (SPRINT)' : ''}`
+                : outCfg === 'dash_3d'
+                ? ` · Dash ${(stamina * 100).toFixed(0)}%${sprinting ? ' (BURST)' : ''}`
+                : outCfg === 'drift_3d'
+                ? ` · Grip ${(((auxVal + 1) * 0.5) * 100).toFixed(0)}%`
+                : outCfg === 'throttle_3d'
+                ? ` · Throttle ${(((auxVal + 1) * 0.5) * 100).toFixed(0)}%`
+                : outCfg === 'car_2d'
+                ? ` · Body ${((headingRad * 180) / Math.PI).toFixed(0)}° · Gear ${(auxVal * 100).toFixed(0)}%`
+                : outCfg === 'asteroids_2d'
+                ? ` · Body ${((headingRad * 180) / Math.PI).toFixed(0)}° · Boost ${(auxVal * 100).toFixed(0)}%`
+                : outCfg === 'compass_2d'
+                ? ` · Compass ${((headingRad * 180) / Math.PI).toFixed(0)}°`
+                : outCfg === 'etch_2d'
+                ? ` · Axis-Locked ${auxVal > 0 ? 'X' : auxVal < 0 ? 'Y' : 'Idle'}`
+                : outCfg === 'polar_2d' ||
+                  outCfg === 'polar_3d' ||
+                  outCfg === 'spin_frame_3d' ||
+                  outCfg === 'hybrid_4d'
+                ? ` · Body ${((headingRad * 180) / Math.PI).toFixed(0)}°`
+                : outCfg === 'thrusters_4d'
+                ? ' · 4-Way Thrusters'
+                : ''}
+            </span>
+            <span>Current episode rolling window</span>
+          </div>
+        );
+      })()}
     </div>
   );
 };

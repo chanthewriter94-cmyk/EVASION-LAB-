@@ -39,6 +39,152 @@ export const ACTIVATION_OPTIONS: { value: ActivationType; label: string }[] = [
   { value: 'cos', label: 'Cos' },
 ];
 
+export type OutputConfig =
+  | 'cartesian_2d'
+  | 'polar_2d'
+  | 'car_2d'
+  | 'asteroids_2d'
+  | 'compass_2d'
+  | 'etch_2d'
+  | 'sprint_burst'
+  | 'dash_3d'
+  | 'throttle_3d'
+  | 'drift_3d'
+  | 'polar_3d'
+  | 'spin_frame_3d'
+  | 'hybrid_4d'
+  | 'thrusters_4d';
+
+export interface OutputConfigSpec {
+  value: OutputConfig;
+  label: string;
+  shortLabel: string;
+  outputSize: number;
+  nodeLabels: string[];
+  description: string;
+}
+
+export const OUTPUT_CONFIG_OPTIONS: OutputConfigSpec[] = [
+  {
+    value: 'cartesian_2d',
+    label: '2-Out: vx, vy',
+    shortLabel: '2-Out (vx,vy)',
+    outputSize: 2,
+    nodeLabels: ['vx', 'vy'],
+    description: 'vx · vy — standard unit-clamped velocity',
+  },
+  {
+    value: 'polar_2d',
+    label: '2-Out: turn, thrust',
+    shortLabel: '2-Out (Polar)',
+    outputSize: 2,
+    nodeLabels: ['turn', 'thrust'],
+    description: 'turn · thrust — pure unicycle steering (360° arcs on 1 neuron)',
+  },
+  {
+    value: 'car_2d',
+    label: '2-Out: steer, gas (Car)',
+    shortLabel: '2-Out (Car)',
+    outputSize: 2,
+    nodeLabels: ['steer', 'gas'],
+    description: 'steer · gas — Ackermann car (speed-gated turns + reverse gear)',
+  },
+  {
+    value: 'asteroids_2d',
+    label: '2-Out: turn, boost (Space)',
+    shortLabel: '2-Out (Asteroids)',
+    outputSize: 2,
+    nodeLabels: ['turn', 'boost'],
+    description: 'turn · boost — Newtonian inertia & coasting forward thruster',
+  },
+  {
+    value: 'compass_2d',
+    label: '2-Out: angle, speed',
+    shortLabel: '2-Out (Compass)',
+    outputSize: 2,
+    nodeLabels: ['angle', 'speed'],
+    description: 'angle · speed — direct -180°..+180° heading sweep + throttle',
+  },
+  {
+    value: 'etch_2d',
+    label: '2-Out: etch x, y',
+    shortLabel: '2-Out (Etch)',
+    outputSize: 2,
+    nodeLabels: ['etchX', 'etchY'],
+    description: 'etchX · etchY — Etch-A-Sketch dominant-axis orthogonal lock',
+  },
+  {
+    value: 'sprint_burst',
+    label: '3-Out: vx, vy, sprint',
+    shortLabel: '3-Out (Sprint)',
+    outputSize: 3,
+    nodeLabels: ['vx', 'vy', 'sprint'],
+    description: 'vx · vy · sprint — stamina-gated 1.45x burst',
+  },
+  {
+    value: 'dash_3d',
+    label: '3-Out: vx, vy, burst (Dash)',
+    shortLabel: '3-Out (Dash)',
+    outputSize: 3,
+    nodeLabels: ['vx', 'vy', 'burst'],
+    description: 'vx · vy · burst — discrete 2.15x impulse dash with recharge',
+  },
+  {
+    value: 'throttle_3d',
+    label: '3-Out: dx, dy, speed',
+    shortLabel: '3-Out (Throttle)',
+    outputSize: 3,
+    nodeLabels: ['dx', 'dy', 'spd'],
+    description: 'dx · dy · spd — independent heading & 0-100% speed',
+  },
+  {
+    value: 'drift_3d',
+    label: '3-Out: vx, vy, grip',
+    shortLabel: '3-Out (Drift)',
+    outputSize: 3,
+    nodeLabels: ['vx', 'vy', 'grip'],
+    description: 'vx · vy · grip — icy glide to crisp cut blend',
+  },
+  {
+    value: 'polar_3d',
+    label: '3-Out: turn, thrust, strafe',
+    shortLabel: '3-Out (Polar+Strafe)',
+    outputSize: 3,
+    nodeLabels: ['turn', 'thrust', 'strafe'],
+    description: 'turn · thrust · strafe — body-frame 360° steering',
+  },
+  {
+    value: 'spin_frame_3d',
+    label: '3-Out: vx, vy, turn',
+    shortLabel: '3-Out (SpinFrame)',
+    outputSize: 3,
+    nodeLabels: ['vx', 'vy', 'turn'],
+    description: 'vx · vy · turn — body-rotated vector steered by turn rate',
+  },
+  {
+    value: 'hybrid_4d',
+    label: '4-Out: vx, vy, turn, thrust',
+    shortLabel: '4-Out (Hybrid)',
+    outputSize: 4,
+    nodeLabels: ['vx', 'vy', 'turn', 'thrust'],
+    description: 'vx · vy + turn · thrust — world vector blended with polar steering',
+  },
+  {
+    value: 'thrusters_4d',
+    label: '4-Out: +x, -x, +y, -y',
+    shortLabel: '4-Out (Thrusters)',
+    outputSize: 4,
+    nodeLabels: ['+x', '-x', '+y', '-y'],
+    description: '+x · -x · +y · -y — four rectified cardinal thrusters',
+  },
+];
+
+export function getOutputConfigSpec(config?: OutputConfig): OutputConfigSpec {
+  return (
+    OUTPUT_CONFIG_OPTIONS.find((opt) => opt.value === config) ?? OUTPUT_CONFIG_OPTIONS[0]
+  );
+}
+
 export class NeuralNetwork {
   weights: number[][][] = [];
   biases: number[][] = [];
@@ -390,7 +536,7 @@ export class NeuralNetwork {
     }
 
     const oldHiddenCount = this.weights.length - 1;
-    let prevSize = this.weights[0]?.[0]?.length ?? 104;
+    let prevSize = this.weights[0]?.[0]?.length ?? 108;
 
     for (let h = 0; h < oldHiddenCount; h++) {
       const oldCount = this.weights[h].length;
@@ -435,6 +581,7 @@ export class NeuralNetwork {
     }
 
     if (targetHiddenLayers > oldHiddenCount) {
+      const preservedOutSize = this.getOutputSize();
       this.weights.pop();
       this.biases.pop();
       this.frozenWeights.pop();
@@ -448,10 +595,10 @@ export class NeuralNetwork {
         prevSize = targetNeurons;
       }
 
-      this.weights.push(this.randomMatrix(2, prevSize));
-      this.biases.push(this.randomVector(2));
-      this.frozenWeights.push(this.boolMatrix(2, prevSize, false));
-      this.frozenBiases.push(this.boolVector(2, false));
+      this.weights.push(this.randomMatrix(preservedOutSize, prevSize));
+      this.biases.push(this.randomVector(preservedOutSize));
+      this.frozenWeights.push(this.boolMatrix(preservedOutSize, prevSize, false));
+      this.frozenBiases.push(this.boolVector(preservedOutSize, false));
     } else if (
       targetHiddenLayers < oldHiddenCount &&
       (!freezeExisting || targetHiddenLayers >= this.getMinimumFrozenDimensions().minLayers)
@@ -491,6 +638,77 @@ export class NeuralNetwork {
       if (this.layerValues.length > targetHiddenLayers + 2) {
         this.layerValues = this.layerValues.slice(0, targetHiddenLayers + 2);
       }
+    }
+  }
+
+  getOutputSize(): number {
+    const outLayer = this.weights[this.weights.length - 1];
+    return outLayer ? outLayer.length : 2;
+  }
+
+  resizeOutputSize(targetOutputSize: number, zeroNewRows = false): void {
+    const target = Math.max(2, Math.min(8, Math.round(targetOutputSize)));
+    const outLayerIdx = this.weights.length - 1;
+    if (outLayerIdx < 0) return;
+
+    const currentSize = this.weights[outLayerIdx].length;
+    const prevSize =
+      this.weights[outLayerIdx][0]?.length ??
+      (outLayerIdx > 0 ? this.weights[outLayerIdx - 1].length : 108);
+
+    if (target > currentSize) {
+      for (let r = currentSize; r < target; r++) {
+        const newRow: number[] = [];
+        const newFrozenRow: boolean[] = [];
+        for (let j = 0; j < prevSize; j++) {
+          newRow.push(zeroNewRows ? 0 : (Math.random() * 2 - 1) * 0.14);
+          newFrozenRow.push(false);
+        }
+        this.weights[outLayerIdx].push(newRow);
+        this.biases[outLayerIdx].push(0);
+        this.frozenWeights[outLayerIdx].push(newFrozenRow);
+        this.frozenBiases[outLayerIdx].push(false);
+      }
+    } else if (target < currentSize) {
+      this.weights[outLayerIdx].length = target;
+      this.biases[outLayerIdx].length = target;
+      this.frozenWeights[outLayerIdx].length = target;
+      this.frozenBiases[outLayerIdx].length = target;
+    }
+
+    if (this.layerValues.length > outLayerIdx + 1) {
+      const outVals = this.layerValues[outLayerIdx + 1];
+      while (outVals.length < target) outVals.push(0);
+      if (outVals.length > target) outVals.length = target;
+    }
+  }
+
+  getInputSize(): number {
+    return this.weights[0]?.[0]?.length ?? 108;
+  }
+
+  resizeInputSize(targetInputSize: number): void {
+    if (this.weights.length === 0) return;
+    const target = Math.max(4, Math.round(targetInputSize));
+    const layer0 = this.weights[0];
+    const frozen0 = this.frozenWeights[0];
+    for (let r = 0; r < layer0.length; r++) {
+      const row = layer0[r];
+      const fRow = frozen0?.[r];
+      if (row.length < target) {
+        while (row.length < target) {
+          row.push(0);
+          fRow?.push(false);
+        }
+      } else if (row.length > target) {
+        row.length = target;
+        if (fRow) fRow.length = target;
+      }
+    }
+    if (this.layerValues.length > 0 && this.layerValues[0]) {
+      const inVals = this.layerValues[0];
+      while (inVals.length < target) inVals.push(0);
+      if (inVals.length > target) inVals.length = target;
     }
   }
 
@@ -596,7 +814,14 @@ export class NeuralNetwork {
 
     const weights: number[][][] = [];
     const biases: number[][] = [];
-    let expectedCols = 104;
+    const firstLayerInputCols =
+      Array.isArray(rawWeights[0]) && Array.isArray((rawWeights[0] as unknown[])[0])
+        ? ((rawWeights[0] as unknown[])[0] as unknown[]).length
+        : 108;
+    if (firstLayerInputCols !== 104 && firstLayerInputCols !== 108) {
+      throw new Error(`Invalid input dimensions at layer 0: expected 104 or 108, got ${firstLayerInputCols}.`);
+    }
+    let expectedCols = firstLayerInputCols;
 
     for (let l = 0; l < rawWeights.length; l++) {
       const layerWeights = rawWeights[l];
@@ -634,8 +859,8 @@ export class NeuralNetwork {
       expectedCols = layerWeights.length;
     }
 
-    if (expectedCols !== 2) {
-      throw new Error(`Expected 2 output neurons, got ${expectedCols}.`);
+    if (expectedCols < 2 || expectedCols > 8) {
+      throw new Error(`Expected 2 to 8 output neurons, got ${expectedCols}.`);
     }
 
     const arch =
@@ -679,6 +904,10 @@ export class NeuralNetwork {
       network.freezeHiddenAll();
     } else {
       network.unfreezeAll();
+    }
+
+    if (network.getInputSize() < 108) {
+      network.resizeInputSize(108);
     }
 
     const fitness =

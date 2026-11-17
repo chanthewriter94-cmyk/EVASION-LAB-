@@ -1,10 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { EvasionEngine } from '../simulation/EvasionEngine';
+import { AgentId, EvasionEngine } from '../simulation/EvasionEngine';
+import { BRAIN_UI_STYLES } from './brainStyles';
 
 interface WeightInspectorProps {
   engine: EvasionEngine;
   tick: number;
-  onToggleHiddenNodeFreeze: (hiddenLayer: number, nodeIndex: number) => void;
+  agentId?: AgentId;
+  dualAgentMode?: boolean;
+  splitBrainMode?: boolean;
+  activeBrainIds?: AgentId[];
+  onSelectAgent?: (id: AgentId) => void;
+  onToggleHiddenNodeFreeze: (hiddenLayer: number, nodeIndex: number, agentId: AgentId) => void;
 }
 
 const HEATMAP_WIDTH = 546;
@@ -13,6 +19,11 @@ const HEATMAP_HEIGHT = 210;
 export const WeightInspector: React.FC<WeightInspectorProps> = ({
   engine,
   tick,
+  agentId = 'A',
+  dualAgentMode = false,
+  splitBrainMode = false,
+  activeBrainIds,
+  onSelectAgent,
   onToggleHiddenNodeFreeze,
 }) => {
   const [selectedLayer, setSelectedLayer] = useState<number>(0);
@@ -20,10 +31,17 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
   const [selectedCell, setSelectedCell] = useState<{ row: number; col: number } | null>(null);
   const heatmapRef = useRef<HTMLCanvasElement | null>(null);
 
-  const net = engine.agent;
+  const resolvedIds = activeBrainIds ?? engine.getActiveBrainIds();
+  const hasTwoBrains = resolvedIds.length > 1 || dualAgentMode || splitBrainMode;
+  const targetId: AgentId = hasTwoBrains
+    ? resolvedIds.includes(agentId)
+      ? agentId
+      : resolvedIds[0] ?? 'A'
+    : 'A';
+  const net = engine.getTargetAgent(targetId);
   const numLayers = net ? net.weights.length : 0;
   const clampedLayer = numLayers > 0 ? Math.min(selectedLayer, numLayers - 1) : 0;
-  const activeInputCount = engine.getActiveInputCount();
+  const activeIndices = engine.getActiveInputIndices(targetId);
 
   useEffect(() => {
     if (selectedLayer >= numLayers && numLayers > 0) {
@@ -31,6 +49,10 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
       setSelectedCell(null);
     }
   }, [numLayers, selectedLayer]);
+
+  useEffect(() => {
+    setSelectedCell(null);
+  }, [targetId]);
 
   const stats = useMemo(() => {
     if (!net) return null;
@@ -84,11 +106,10 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
     const isInputLayer = clampedLayer === 0;
     const isOutputLayer = clampedLayer === net.weights.length - 1;
 
-    const colIndices: number[] = [];
-    const colLimit = isInputLayer && activeInputsOnly ? Math.min(rawCols, activeInputCount) : rawCols;
-    for (let c = 0; c < colLimit; c++) {
-      colIndices.push(c);
-    }
+    const colIndices: number[] =
+      isInputLayer && activeInputsOnly
+        ? activeIndices.filter((c) => c < rawCols)
+        : Array.from({ length: rawCols }, (_, c) => c);
 
     let maxAbs = 0.25;
     for (let r = 0; r < rows; r++) {
@@ -100,6 +121,7 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
       }
     }
 
+    const outputLabels = engine.getOutputLabels(targetId);
     const rowSummaries = matrix.map((row, r) => {
       let l1 = 0;
       const drivers: { col: number; w: number }[] = [];
@@ -111,7 +133,7 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
       drivers.sort((a, b) => Math.abs(b.w) - Math.abs(a.w));
       return {
         row: r,
-        label: isOutputLayer ? (r === 0 ? 'vx' : 'vy') : `N${r + 1}`,
+        label: isOutputLayer ? (outputLabels[r] ?? `O${r + 1}`) : `N${r + 1}`,
         bias: biases[r] ?? 0,
         act: net.layerValues[clampedLayer + 1]?.[r] ?? 0,
         l1,
@@ -131,7 +153,7 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
       isOutputLayer,
       rowSummaries,
     };
-  }, [net, clampedLayer, activeInputsOnly, activeInputCount, tick]);
+  }, [net, clampedLayer, activeInputsOnly, activeIndices, engine, targetId, tick]);
 
   useEffect(() => {
     const canvas = heatmapRef.current;
@@ -142,10 +164,10 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
     ctx.fillStyle = '#050505';
     ctx.fillRect(0, 0, HEATMAP_WIDTH, HEATMAP_HEIGHT);
 
-    const { rows, colIndices, matrix, biases, maxAbs, isOutputLayer } = layerView;
+    const { rows, colIndices, matrix, biases, maxAbs, isInputLayer, isOutputLayer } = layerView;
     if (rows === 0 || colIndices.length === 0) return;
 
-    const leftPad = 28;
+    const leftPad = isOutputLayer ? 42 : 28;
     const topPad = 14;
     const biasColW = 16;
     const biasGap = 6;
@@ -160,6 +182,17 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
     ctx.fillText('in ->', 2, 7);
     ctx.fillText('b', leftPad + gridW + biasGap + 5, 7);
 
+    // Subtle header marker bar for partner telepathy input columns
+    if (isInputLayer && dualAgentMode && !splitBrainMode) {
+      for (let ci = 0; ci < colIndices.length; ci++) {
+        if (colIndices[ci] >= 104) {
+          ctx.fillStyle = targetId === 'A' ? '#f59e0b' : '#22d3ee';
+          ctx.fillRect(leftPad + ci * cellW, topPad - 4, Math.max(1, cellW - 0.5), 2);
+        }
+      }
+    }
+
+    const outputLabels = engine.getOutputLabels(targetId);
     for (let r = 0; r < rows; r++) {
       const y = topPad + r * cellH;
       const isRowFrozen = !isOutputLayer && Boolean(net.frozenBiases[clampedLayer]?.[r]);
@@ -167,7 +200,7 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
       if (rows <= 32 || r % 2 === 0) {
         ctx.fillStyle = isRowFrozen ? '#7fb3ff' : '#888';
         ctx.font = '9px monospace';
-        const rLabel = isOutputLayer ? (r === 0 ? 'vx' : 'vy') : `${r + 1}`;
+        const rLabel = isOutputLayer ? (outputLabels[r] ?? `O${r + 1}`) : `${r + 1}`;
         ctx.fillText(rLabel, 2, y + cellH * 0.5);
       }
 
@@ -220,7 +253,7 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
         ctx.strokeRect(bx + 0.5, y + 0.5, biasColW - 1, Math.max(2, cellH - 1));
       }
     }
-  }, [layerView, net, clampedLayer, selectedCell]);
+  }, [layerView, net, clampedLayer, selectedCell, dualAgentMode, splitBrainMode, targetId, engine]);
 
   const handleHeatmapPick = (clientX: number, clientY: number) => {
     const canvas = heatmapRef.current;
@@ -231,7 +264,7 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
     const px = ((clientX - rect.left) / rect.width) * HEATMAP_WIDTH;
     const py = ((clientY - rect.top) / rect.height) * HEATMAP_HEIGHT;
 
-    const leftPad = 28;
+    const leftPad = layerView.isOutputLayer ? 42 : 28;
     const topPad = 14;
     const biasColW = 16;
     const biasGap = 6;
@@ -254,7 +287,7 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
 
   if (!net || !layerView || !stats) {
     return (
-      <div className="w-[95%] max-w-[570px] bg-[#0a0a0a] border border-[#333] p-[10px] font-mono text-[11px] text-[#888]">
+      <div className="w-full bg-[#0a0a0a] border border-[#2a2a2a] p-[10px] font-mono text-[11px] text-[#888] overflow-hidden">
         Waiting for agent weights...
       </div>
     );
@@ -262,7 +295,9 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
 
   const colDisplayName = (colIdx: number): string => {
     if (colIdx === -1) return 'bias';
-    return layerView.isInputLayer ? engine.getInputLabel(colIdx) : `H${clampedLayer}.${colIdx + 1}`;
+    return layerView.isInputLayer
+      ? engine.getInputLabel(colIdx, targetId)
+      : `H${clampedLayer}.${colIdx + 1}`;
   };
 
   const detailRow = selectedCell ? Math.min(selectedCell.row, layerView.rows - 1) : 0;
@@ -282,14 +317,35 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
   return (
     <div
       id="weightInspectorPanel"
-      className="w-[95%] max-w-[570px] bg-[#0a0a0a] border border-[#333] p-[8px] font-mono text-[11px] text-[#ddd] flex flex-col gap-[6px]"
+      className="w-full bg-[#0a0a0a] border border-[#2a2a2a] p-[8px] font-mono text-[11px] text-[#ddd] flex flex-col gap-[6px] overflow-hidden"
     >
       <div className="flex items-center justify-between gap-[6px] flex-wrap text-[11px] text-[#aaa] border-b border-[#222] pb-[5px]">
-        <span>
-          Params: <span className="text-[#eee] tabular-nums">{stats.totalParams}</span> | Range:{' '}
-          <span className="text-[#f77] tabular-nums">{stats.minW.toFixed(2)}</span>..
-          <span className="text-[#0ff] tabular-nums">+{stats.maxW.toFixed(2)}</span>
-        </span>
+        <div className="flex items-center gap-[6px] flex-wrap">
+          {hasTwoBrains && onSelectAgent && (
+            <span className="inline-flex border border-[#3a3a3a]">
+              {resolvedIds.map((id, idx) => (
+                <button
+                  key={id}
+                  type="button"
+                  title={`${splitBrainMode ? 'Brain' : 'Agent'} ${id} (${BRAIN_UI_STYLES[id].colorName})`}
+                  onClick={() => onSelectAgent(id)}
+                  className={`${
+                    targetId === id
+                      ? BRAIN_UI_STYLES[id].activeTabClass
+                      : 'bg-[#161616] text-[#999] hover:bg-[#242424]'
+                  } border-none ${idx > 0 ? 'border-l border-[#3a3a3a]' : ''} px-[6px] py-[1px] font-mono text-[10px] cursor-pointer whitespace-nowrap`}
+                >
+                  {resolvedIds.length > 2 ? id : `${splitBrainMode ? 'Brain' : 'Agent'} ${id}`}
+                </button>
+              ))}
+            </span>
+          )}
+          <span>
+            Params: <span className="text-[#eee] tabular-nums">{stats.totalParams}</span> | Range:{' '}
+            <span className="text-[#f77] tabular-nums">{stats.minW.toFixed(2)}</span>..
+            <span className="text-[#0ff] tabular-nums">+{stats.maxW.toFixed(2)}</span>
+          </span>
+        </div>
         <span>
           Mean |w|: <span className="text-[#eee] tabular-nums">{stats.meanAbs.toFixed(3)}</span> |{' '}
           &lt;0.05: <span className="text-[#eee] tabular-nums">{stats.nearZeroPct.toFixed(0)}%</span>{' '}
@@ -333,14 +389,16 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
           <button
             type="button"
             onClick={() => setActiveInputsOnly((prev) => !prev)}
-            title="Toggle between active inputs for the current mode and all 104 input slots"
+            title="Toggle between active inputs for the current mode and all 108 input slots"
             className={`${
               activeInputsOnly
                 ? 'bg-[#193838] text-[#8ff] border-[#0aa]'
                 : 'bg-[#1b1b1b] text-[#aaa] border-[#3a3a3a]'
             } border px-[6px] py-[2px] font-mono text-[10px] cursor-pointer whitespace-nowrap`}
           >
-            {activeInputsOnly ? `Active In (${Math.min(104, activeInputCount)})` : 'All 104 In'}
+            {activeInputsOnly
+              ? `Active In (${layerView.colIndices.length})`
+              : `All ${layerView.rawCols} In`}
           </button>
         )}
       </div>
@@ -358,7 +416,11 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
       <div className="flex items-center justify-between gap-[6px] flex-wrap bg-[#141414] border border-[#2a2a2a] px-[6px] py-[4px]">
         <div className="tabular-nums">
           <span className="text-[#888]">
-            {layerView.rowSummaries[detailRow]?.label} &larr; {colDisplayName(detailCol)}:
+            {layerView.rowSummaries[detailRow]?.label} &larr;{' '}
+            <span className={layerView.isInputLayer && detailCol >= 104 ? (targetId === 'A' ? 'text-[#fbbf24]' : 'text-[#22d3ee]') : ''}>
+              {colDisplayName(detailCol)}
+            </span>
+            :
           </span>{' '}
           <span className={detailVal >= 0 ? 'text-[#0ff]' : 'text-[#f66]'}>
             {detailVal >= 0 ? '+' : ''}
@@ -375,7 +437,7 @@ export const WeightInspector: React.FC<WeightInspectorProps> = ({
         {!layerView.isOutputLayer && (
           <button
             type="button"
-            onClick={() => onToggleHiddenNodeFreeze(clampedLayer, detailRow)}
+            onClick={() => onToggleHiddenNodeFreeze(clampedLayer, detailRow, targetId)}
             className={`${
               detailFrozen
                 ? 'bg-[#2a4b7c] border-[#5c94e0] text-[#e6f0ff]'

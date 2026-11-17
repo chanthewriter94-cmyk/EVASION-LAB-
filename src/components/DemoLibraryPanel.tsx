@@ -1,12 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { HumanDemoRecording, TrainingResult } from '../simulation/DemonstrationStore';
-import { ActivationType } from '../simulation/NeuralNetwork';
+import type { AgentId } from '../simulation/EvasionEngine';
+import { ActivationType, getOutputConfigSpec, OutputConfig } from '../simulation/NeuralNetwork';
+import { BRAIN_UI_STYLES } from './brainStyles';
 
 interface DemoLibraryPanelProps {
   demos: HumanDemoRecording[];
   layers: number;
   neurons: number;
   activation: ActivationType;
+  outputConfig?: OutputConfig;
+  dualAgentMode?: boolean;
+  splitBrainMode?: boolean;
+  activeBrainIds?: AgentId[];
+  targetAgent?: AgentId;
+  onSelectTargetAgent?: (id: AgentId) => void;
   onDeleteDemo: (id: string) => void;
   onClearAllDemos: () => void;
   onDownloadAllDemos: () => void;
@@ -16,6 +24,7 @@ interface DemoLibraryPanelProps {
     epochs: number;
     learningRate: number;
     seedPopulation: boolean;
+    agentId?: AgentId;
   }) => TrainingResult;
   onClose: () => void;
 }
@@ -25,6 +34,12 @@ export const DemoLibraryPanel: React.FC<DemoLibraryPanelProps> = ({
   layers,
   neurons,
   activation,
+  outputConfig = 'cartesian_2d',
+  dualAgentMode = false,
+  splitBrainMode = false,
+  activeBrainIds,
+  targetAgent = 'A',
+  onSelectTargetAgent,
   onDeleteDemo,
   onClearAllDemos,
   onDownloadAllDemos,
@@ -149,10 +164,18 @@ export const DemoLibraryPanel: React.FC<DemoLibraryPanelProps> = ({
     try {
       const epochs = Math.max(1, Math.min(200, parseInt(epochsText, 10) || 40));
       const learningRate = Math.max(0.0001, Math.min(0.05, parseFloat(lrText) || 0.004));
-      const res = onTrainModel({ epochs, learningRate, seedPopulation });
+      const resolvedIds =
+        activeBrainIds ?? (dualAgentMode || splitBrainMode ? (['A', 'B'] as AgentId[]) : (['A'] as AgentId[]));
+      const hasTwoBrains = resolvedIds.length > 1 || dualAgentMode || splitBrainMode;
+      const activeTarget: AgentId = hasTwoBrains
+        ? resolvedIds.includes(targetAgent)
+          ? targetAgent
+          : resolvedIds[0] ?? 'A'
+        : 'A';
+      const res = onTrainModel({ epochs, learningRate, seedPopulation, agentId: activeTarget });
       setTrainResult(res);
       setStatusMsg({
-        text: `Trained ${res.epochsRun} epochs on ${res.totalFrames} frames (applied to model)`,
+        text: `Trained ${hasTwoBrains ? `${splitBrainMode ? 'Brain' : 'Agent'} ${activeTarget} · ` : ''}${res.epochsRun} epochs on ${res.totalFrames} frames (applied)`,
         isError: false,
       });
     } catch (err) {
@@ -304,13 +327,10 @@ export const DemoLibraryPanel: React.FC<DemoLibraryPanelProps> = ({
                 <span className="text-[#eee] font-bold truncate max-w-[140px]">{demo.name}</span>
                 <span className="text-[#0cc] tabular-nums">{demo.steps} frames</span>
                 <span className="text-[#888] tabular-nums">
-                  {demo.envSummary.simMode === 'restaurant'
-                    ? 'REST'
-                    : `E:${demo.envSummary.numEnemies}`}{' '}
-                  · Fit:{Math.round(demo.fitness)}
+                  E:{demo.envSummary.numEnemies} · Fit:{Math.round(demo.fitness)}
                 </span>
                 <span className={demo.hit ? 'text-[#f66]' : 'text-[#6d6]'}>
-                  {demo.hit ? (demo.envSummary.simMode === 'restaurant' ? 'ENDED' : 'HIT') : 'SAVED'}
+                  {demo.hit ? 'HIT' : 'SAVED'}
                 </span>
               </div>
               <div className="flex items-center gap-[4px] shrink-0">
@@ -339,9 +359,51 @@ export const DemoLibraryPanel: React.FC<DemoLibraryPanelProps> = ({
       {/* Imitation / Behavioral Cloning Training Box */}
       <div className="p-[8px] bg-[#151515] border border-[#2f2f2f] flex flex-col gap-[6px]">
         <div className="flex items-center justify-between gap-[6px] flex-wrap">
-          <span className="text-[#eee] font-bold">
-            Imitation Training ({layers}×{neurons} {activation})
-          </span>
+          <div className="flex items-center gap-[6px] flex-wrap">
+            {(() => {
+              const resolvedIds =
+                activeBrainIds ??
+                (dualAgentMode || splitBrainMode ? (['A', 'B'] as AgentId[]) : (['A'] as AgentId[]));
+              const hasMultiple = resolvedIds.length > 1;
+              const activeTarget: AgentId = hasMultiple
+                ? resolvedIds.includes(targetAgent)
+                  ? targetAgent
+                  : resolvedIds[0] ?? 'A'
+                : 'A';
+              return (
+                <>
+                  {hasMultiple && onSelectTargetAgent && (
+                    <span className="inline-flex border border-[#3a3a3a]">
+                      {resolvedIds.map((id, idx) => (
+                        <button
+                          key={id}
+                          type="button"
+                          title={`${splitBrainMode ? 'Brain' : 'Agent'} ${id} (${BRAIN_UI_STYLES[id].colorName})`}
+                          onClick={() => onSelectTargetAgent(id)}
+                          className={`${
+                            activeTarget === id
+                              ? BRAIN_UI_STYLES[id].activeTabClass
+                              : 'bg-[#161616] text-[#999] hover:bg-[#242424]'
+                          } border-none ${idx > 0 ? 'border-l border-[#3a3a3a]' : ''} px-[5px] py-[1px] font-mono text-[10px] cursor-pointer whitespace-nowrap`}
+                        >
+                          {resolvedIds.length > 2 ? id : `${splitBrainMode ? 'Brain' : 'Agent'} ${id}`}
+                        </button>
+                      ))}
+                    </span>
+                  )}
+                  <span className="text-[#eee] font-bold">
+                    Imitation Training{' '}
+                    {hasMultiple && (
+                      <span className={BRAIN_UI_STYLES[activeTarget].textClass}>
+                        [{splitBrainMode ? 'Brain' : 'Agent'} {activeTarget}]{' '}
+                      </span>
+                    )}
+                    ({layers}×{neurons} {activation} · {getOutputConfigSpec(outputConfig).shortLabel})
+                  </span>
+                </>
+              );
+            })()}
+          </div>
           <span className="text-[#888]">Respects frozen neurons</span>
         </div>
 

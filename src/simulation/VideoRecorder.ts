@@ -56,6 +56,7 @@ export class VideoRecorder {
     activeRewardLabels: [],
   };
   private trail: { x: number; y: number }[] = [];
+  private trailB: { x: number; y: number }[] = [];
   private lastStepCount = -1;
   private ext: 'mp4' | 'webm' = 'webm';
   private mimeType = 'video/webm';
@@ -96,6 +97,7 @@ export class VideoRecorder {
       activeRewardLabels: [...options.activeRewardLabels],
     };
     this.trail = [];
+    this.trailB = [];
     this.lastStepCount = -1;
     this.chunks = [];
     this.isStopping = false;
@@ -232,17 +234,21 @@ export class VideoRecorder {
     ctx.textBaseline = 'middle';
     const bestFit =
       engine.bestFitness === -Infinity ? 0 : Math.round(engine.bestFitness);
-    const hudLeft =
-      engine.params.simMode === 'restaurant'
-        ? `GEN ${engine.generation}  |  FIT ${Math.round(
-            engine.currentFitness
-          )}  |  BEST ${bestFit}  |  STEP ${engine.stepCount}  |  SERVED:${engine.restaurant.customersServed} LEFT:${engine.restaurant.customersLeft}`
-        : `GEN ${engine.generation}  |  FIT ${Math.round(
-            engine.currentFitness
-          )}  |  BEST ${bestFit}  |  STEP ${engine.stepCount}  |  E:${engine.params.numEnemies}`;
+    const modeTag = engine.splitBrainMode
+      ? `  |  SPLIT BRAIN (${engine.splitBrainCount}x)`
+      : engine.dualAgentMode
+      ? '  |  DUAL'
+      : '';
+    const fitReadout = engine.splitBrainMode
+      ? engine
+          .getActiveBrainIds()
+          .map((id) => `${id}:${Math.round(engine.getSplitBrainFitness(id))}`)
+          .join(' ')
+      : `FIT ${Math.round(engine.currentFitness)}`;
+    const hudLeft = `GEN ${engine.generation}  |  ${fitReadout}  |  BEST ${bestFit}  |  STEP ${engine.stepCount}  |  E:${engine.params.numEnemies}${modeTag}`;
     ctx.fillText(hudLeft, 28, 17);
 
-    if (engine.params.simMode === 'evasion' && activeRewardLabels.length > 0 && w >= 600) {
+    if (activeRewardLabels.length > 0 && w >= 600) {
       const maxShown = w >= 1200 ? 6 : 4;
       const rewardSummary =
         activeRewardLabels.slice(0, maxShown).join(' ') +
@@ -284,6 +290,7 @@ export class VideoRecorder {
       // Reset trail on episode rollover
       if (engine.stepCount < this.lastStepCount) {
         this.trail = [];
+        this.trailB = [];
       }
       this.lastStepCount = engine.stepCount;
       const lastPt = this.trail[this.trail.length - 1];
@@ -294,7 +301,7 @@ export class VideoRecorder {
         }
       }
 
-      // Fading cyan motion trail
+      // Fading cyan motion trail (Agent A)
       for (let i = 1; i < this.trail.length; i++) {
         const alpha = (i / this.trail.length) * 0.55;
         ctx.strokeStyle = `rgba(0, 255, 255, ${alpha.toFixed(2)})`;
@@ -305,7 +312,7 @@ export class VideoRecorder {
         ctx.stroke();
       }
 
-      // Steering velocity vector indicator from player
+      // Steering velocity vector indicator from player A
       const vMag = Math.hypot(engine.player.vx, engine.player.vy);
       if (vMag > 0.1) {
         const nx = engine.player.vx / vMag;
@@ -319,6 +326,38 @@ export class VideoRecorder {
         ctx.moveTo(engine.player.x, engine.player.y);
         ctx.lineTo(ax, ay);
         ctx.stroke();
+      }
+
+      // Agent B trail & steering vector in Dual Agent Mode
+      if (engine.dualAgentMode) {
+        const lastPtB = this.trailB[this.trailB.length - 1];
+        if (!lastPtB || Math.hypot(engine.playerB.x - lastPtB.x, engine.playerB.y - lastPtB.y) >= 1) {
+          this.trailB.push({ x: engine.playerB.x, y: engine.playerB.y });
+          if (this.trailB.length > 28) {
+            this.trailB.shift();
+          }
+        }
+        for (let i = 1; i < this.trailB.length; i++) {
+          const alpha = (i / this.trailB.length) * 0.55;
+          ctx.strokeStyle = `rgba(245, 158, 11, ${alpha.toFixed(2)})`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(this.trailB[i - 1].x, this.trailB[i - 1].y);
+          ctx.lineTo(this.trailB[i].x, this.trailB[i].y);
+          ctx.stroke();
+        }
+        const vMagB = Math.hypot(engine.playerB.vx, engine.playerB.vy);
+        if (vMagB > 0.1) {
+          const nx = engine.playerB.vx / vMagB;
+          const ny = engine.playerB.vy / vMagB;
+          const arrowLen = 14 + (vMagB / engine.playerSpeed) * 14;
+          ctx.strokeStyle = 'rgba(254, 240, 138, 0.8)';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(engine.playerB.x, engine.playerB.y);
+          ctx.lineTo(engine.playerB.x + nx * arrowLen, engine.playerB.y + ny * arrowLen);
+          ctx.stroke();
+        }
       }
 
       ctx.strokeStyle = '#333';

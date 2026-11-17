@@ -84,18 +84,17 @@ export const FrozenInfoPopover: React.FC<FrozenInfoPopoverProps> = ({
           <div className="flex flex-col gap-[6px]">
             {frozenRewards.map((entry, idx) => (
               <div
-                key={`${entry.simMode}-${entry.generation}-${idx}`}
+                key={`${entry.generation}-${idx}`}
                 className={idx > 0 ? 'pt-[5px] border-t border-[#1e2d45]' : ''}
               >
                 <div className="text-[10px] text-[#7ea6dc] mb-[3px] tabular-nums">
                   {frozenRewards.length > 1 ? `Stage ${idx + 1} · ` : ''}
-                  Gen {entry.generation} · {entry.simMode === 'restaurant' ? 'Restaurant' : 'Evasion'}
+                  Gen {entry.generation}
                 </div>
                 <ul className="m-0 pl-[14px] flex flex-col gap-[2px] text-[11px]">
                   {entry.rewards.map((rewardStr, rIdx) => {
                     const isNeg = rewardStr.startsWith('-');
-                    const isNeutral =
-                      rewardStr.startsWith('Survival') || rewardStr.startsWith('Restaurant');
+                    const isNeutral = rewardStr.startsWith('Survival');
                     return (
                       <li
                         key={`${rIdx}-${rewardStr}`}

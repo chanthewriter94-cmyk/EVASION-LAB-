@@ -1,7 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { DemoFrame, HumanDemoRecording, TrainingResult } from '../simulation/DemonstrationStore';
-import { EvasionEngine, SIM_HEIGHT, SIM_WIDTH } from '../simulation/EvasionEngine';
+import {
+  AgentId,
+  BRAIN_COLORS,
+  EvasionEngine,
+  SIM_HEIGHT,
+  SIM_WIDTH,
+} from '../simulation/EvasionEngine';
 import { ActivationType } from '../simulation/NeuralNetwork';
+import { BRAIN_UI_STYLES } from './brainStyles';
 import { DemoLibraryPanel } from './DemoLibraryPanel';
 
 interface HumanDemoOverlayProps {
@@ -10,6 +17,11 @@ interface HumanDemoOverlayProps {
   layers: number;
   neurons: number;
   activation: ActivationType;
+  dualAgentMode?: boolean;
+  splitBrainMode?: boolean;
+  activeBrainIds?: AgentId[];
+  targetAgent?: AgentId;
+  onSelectTargetAgent?: (id: AgentId) => void;
   onSaveDemo: (demo: HumanDemoRecording) => void;
   onDeleteDemo: (id: string) => void;
   onClearAllDemos: () => void;
@@ -20,6 +32,7 @@ interface HumanDemoOverlayProps {
     epochs: number;
     learningRate: number;
     seedPopulation: boolean;
+    agentId?: AgentId;
   }) => TrainingResult;
   onExit: () => void;
 }
@@ -34,6 +47,11 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
   layers,
   neurons,
   activation,
+  dualAgentMode = false,
+  splitBrainMode = false,
+  activeBrainIds,
+  targetAgent = 'A',
+  onSelectTargetAgent,
   onSaveDemo,
   onDeleteDemo,
   onClearAllDemos,
@@ -43,15 +61,24 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
   onTrainModel,
   onExit,
 }) => {
+  const resolvedIds = activeBrainIds ?? engine.getActiveBrainIds();
+  const hasTwoBrains = resolvedIds.length > 1 || dualAgentMode || splitBrainMode;
+  const initialTarget: AgentId = hasTwoBrains
+    ? resolvedIds.includes(targetAgent)
+      ? targetAgent
+      : resolvedIds[0] ?? 'A'
+    : 'A';
   const arenaCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const stickCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  const [controlledAgent, setControlledAgent] = useState<AgentId>(initialTarget);
   const [showTrainer, setShowTrainer] = useState<boolean>(false);
   const [liveSteps, setLiveSteps] = useState<number>(0);
   const [liveFitness, setLiveFitness] = useState<number>(0);
   const [isRunActive, setIsRunActive] = useState<boolean>(false);
   const [bannerText, setBannerText] = useState<string>('Move stick or WASD to start');
 
+  const controlledAgentRef = useRef<AgentId>(initialTarget);
   const showTrainerRef = useRef<boolean>(false);
   const runActiveRef = useRef<boolean>(false);
   const framesRef = useRef<DemoFrame[]>([]);
@@ -69,6 +96,18 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
     ay: number;
   } | null>(null);
   const keysDownRef = useRef<Set<string>>(new Set());
+  const auxHoldRef = useRef<boolean>(false);
+  const [auxHeldUi, setAuxHeldUi] = useState<boolean>(false);
+  useEffect(() => {
+    const resolved: AgentId = hasTwoBrains
+      ? resolvedIds.includes(targetAgent)
+        ? targetAgent
+        : resolvedIds[0] ?? 'A'
+      : 'A';
+    controlledAgentRef.current = resolved;
+    setControlledAgent(resolved);
+  }, [hasTwoBrains, resolvedIds, targetAgent]);
+
   const demoCountRef = useRef<number>(demos.length);
 
   useEffect(() => {
@@ -97,6 +136,13 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
     }
   }, [engine, setBanner]);
 
+  const handleSwitchControlledAgent = (id: AgentId) => {
+    controlledAgentRef.current = id;
+    setControlledAgent(id);
+    onSelectTargetAgent?.(id);
+    resetForNextRun();
+  };
+
   const finalizeAndBankRun = useCallback(
     (wasHit: boolean) => {
       const recorded = framesRef.current;
@@ -106,17 +152,20 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
         return false;
       }
 
+      const activeId: AgentId = hasTwoBrains ? controlledAgentRef.current : 'A';
       const nextNum = demoCountRef.current + 1;
-      const isRest = engine.params.simMode === 'restaurant';
+      const fitVal = splitBrainMode
+        ? engine.getSplitBrainFitness(activeId)
+        : engine.currentFitness;
       const demo: HumanDemoRecording = {
         id: `demo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        name: `${isRest ? 'Shift' : 'Run'} #${nextNum}`,
+        name: hasTwoBrains ? `Run #${nextNum} (${activeId})` : `Run #${nextNum}`,
         createdAt: new Date().toISOString(),
         steps: recorded.length,
-        fitness: engine.currentFitness,
+        fitness: fitVal,
         hit: wasHit,
         envSummary: {
-          simMode: engine.params.simMode,
+          outputConfig: engine.getOutputConfig(activeId),
           numEnemies: engine.params.numEnemies,
           enemySpeedPct: engine.params.enemySpeedPct,
           enemySpeedMode: engine.params.enemySpeedMode,
@@ -127,13 +176,13 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
 
       onSaveDemo(demo);
       resetForNextRun(true);
-      const endPrefix = wasHit ? (isRest ? 'SHIFT ENDED! ' : 'HIT! ') : '';
+      const endPrefix = wasHit ? 'HIT! ' : '';
       setBanner(
         `${endPrefix}Saved ${demo.name} (${demo.steps} frames) — Move stick for next run`
       );
       return true;
     },
-    [engine.currentFitness, engine.params, onSaveDemo, resetForNextRun, setBanner]
+    [hasTwoBrains, splitBrainMode, engine, onSaveDemo, resetForNextRun, setBanner]
   );
 
   // Initialize fresh episode on mount
@@ -147,7 +196,9 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
       if (showTrainerRef.current) return;
       const key = e.key.toLowerCase();
       if (
-        ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)
+        ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' ', 'shift'].includes(
+          key
+        )
       ) {
         e.preventDefault();
         keysDownRef.current.add(key);
@@ -158,6 +209,8 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
     };
     const onBlur = () => {
       keysDownRef.current.clear();
+      auxHoldRef.current = false;
+      setAuxHeldUi(false);
     };
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
@@ -204,6 +257,8 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
 
         const ctrl = getCurrentControl();
         const ctrlMag = Math.hypot(ctrl.ax, ctrl.ay);
+        const activeId: AgentId = hasTwoBrains ? controlledAgentRef.current : 'A';
+        const targetPlayer = engine.getTargetPlayer(activeId);
 
         if (!showTrainerRef.current) {
           if (!runActiveRef.current && ctrlMag > 0.06) {
@@ -213,7 +268,11 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
           }
 
           if (runActiveRef.current) {
-            const stepRes = engine.stepHumanControl(ctrl.ax, ctrl.ay);
+            const auxActive =
+              auxHoldRef.current ||
+              keysDownRef.current.has(' ') ||
+              keysDownRef.current.has('shift');
+            const stepRes = engine.stepHumanControl(ctrl.ax, ctrl.ay, auxActive, activeId);
             framesRef.current.push({
               inputs: stepRes.inputs,
               action: stepRes.action,
@@ -221,12 +280,13 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
             setLiveSteps(framesRef.current.length);
             setLiveFitness(Math.round(stepRes.fitness));
 
+            const curPl = engine.getTargetPlayer(activeId);
             const lastPt = trailRef.current[trailRef.current.length - 1];
             if (
               !lastPt ||
-              Math.hypot(engine.player.x - lastPt.x, engine.player.y - lastPt.y) >= 1.5
+              Math.hypot(curPl.x - lastPt.x, curPl.y - lastPt.y) >= 1.5
             ) {
-              trailRef.current.push({ x: engine.player.x, y: engine.player.y });
+              trailRef.current.push({ x: curPl.x, y: curPl.y });
               if (trailRef.current.length > 32) {
                 trailRef.current.shift();
               }
@@ -235,7 +295,11 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
             if (stepRes.hit || engine.stepCount >= engine.maxSteps) {
               finalizeAndBankRun(stepRes.hit);
             }
+          } else {
+            engine.silenceContinuousAudio();
           }
+        } else {
+          engine.silenceContinuousAudio();
         }
 
         // Render Brotato-style Arena Canvas
@@ -244,29 +308,27 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
         if (aCtx) {
           engine.drawArena(aCtx);
 
-          if (engine.params.simMode !== 'restaurant') {
-            // Crisp arena grid
-            aCtx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
-            aCtx.lineWidth = 1;
-            for (let gx = 50; gx < SIM_WIDTH; gx += 50) {
-              aCtx.beginPath();
-              aCtx.moveTo(gx, 0);
-              aCtx.lineTo(gx, SIM_HEIGHT);
-              aCtx.stroke();
-            }
-            for (let gy = 50; gy < SIM_HEIGHT; gy += 50) {
-              aCtx.beginPath();
-              aCtx.moveTo(0, gy);
-              aCtx.lineTo(SIM_WIDTH, gy);
-              aCtx.stroke();
-            }
+          // Crisp arena grid
+          aCtx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+          aCtx.lineWidth = 1;
+          for (let gx = 50; gx < SIM_WIDTH; gx += 50) {
+            aCtx.beginPath();
+            aCtx.moveTo(gx, 0);
+            aCtx.lineTo(gx, SIM_HEIGHT);
+            aCtx.stroke();
+          }
+          for (let gy = 50; gy < SIM_HEIGHT; gy += 50) {
+            aCtx.beginPath();
+            aCtx.moveTo(0, gy);
+            aCtx.lineTo(SIM_WIDTH, gy);
+            aCtx.stroke();
           }
 
-          // Fading motion trail
+          // Fading motion trail for controlled agent
           const trail = trailRef.current;
           for (let i = 1; i < trail.length; i++) {
             const alpha = (i / trail.length) * 0.5;
-            aCtx.strokeStyle = `rgba(0, 255, 255, ${alpha.toFixed(2)})`;
+            aCtx.strokeStyle = BRAIN_COLORS[activeId].rgba(Number(alpha.toFixed(2)));
             aCtx.lineWidth = 2;
             aCtx.beginPath();
             aCtx.moveTo(trail[i - 1].x, trail[i - 1].y);
@@ -274,16 +336,16 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
             aCtx.stroke();
           }
 
-          // Control vector indicator around player
+          // Control vector indicator around controlled player
           if (ctrlMag > 0.05) {
             const arrowLen = 14 + ctrlMag * 16;
             aCtx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
             aCtx.lineWidth = 1.8;
             aCtx.beginPath();
-            aCtx.moveTo(engine.player.x, engine.player.y);
+            aCtx.moveTo(targetPlayer.x, targetPlayer.y);
             aCtx.lineTo(
-              engine.player.x + (ctrl.ax / ctrlMag) * arrowLen,
-              engine.player.y + (ctrl.ay / ctrlMag) * arrowLen
+              targetPlayer.x + (ctrl.ax / ctrlMag) * arrowLen,
+              targetPlayer.y + (ctrl.ay / ctrlMag) * arrowLen
             );
             aCtx.stroke();
           }
@@ -292,7 +354,7 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
           if (!runActiveRef.current && lastBannerRef.current) {
             aCtx.fillStyle = 'rgba(0, 0, 0, 0.62)';
             aCtx.fillRect(0, SIM_HEIGHT - 30, SIM_WIDTH, 30);
-            aCtx.fillStyle = '#0ff';
+            aCtx.fillStyle = BRAIN_COLORS[activeId].lightHex;
             aCtx.font = 'bold 12px monospace';
             aCtx.textAlign = 'center';
             aCtx.textBaseline = 'middle';
@@ -365,8 +427,14 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
     };
 
     animId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(animId);
-  }, [engine, finalizeAndBankRun, getCurrentControl, setBanner]);
+    return () => {
+      cancelAnimationFrame(animId);
+      engine.silenceContinuousAudio();
+    };
+  }, [hasTwoBrains, engine, finalizeAndBankRun, getCurrentControl, setBanner]);
+
+  const activeAgentId: AgentId = hasTwoBrains ? controlledAgent : 'A';
+  const activeOutputCfg = engine.getOutputConfig(activeAgentId);
 
   const toStickCoords = (clientX: number, clientY: number) => {
     const canvas = stickCanvasRef.current;
@@ -395,19 +463,35 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
             />
             HUMAN DEMO
           </span>
+          {hasTwoBrains && (
+            <span className="inline-flex border border-[#3a3a3a]">
+              {resolvedIds.map((id, idx) => (
+                <button
+                  key={id}
+                  type="button"
+                  title={`Control ${splitBrainMode ? 'Brain' : 'Agent'} ${id} (${BRAIN_UI_STYLES[id].colorName})`}
+                  onClick={() => handleSwitchControlledAgent(id)}
+                  className={`${
+                    activeAgentId === id
+                      ? BRAIN_UI_STYLES[id].activeTabClass
+                      : 'bg-[#161616] text-[#999] hover:bg-[#242424]'
+                  } border-none ${idx > 0 ? 'border-l border-[#3a3a3a]' : ''} px-[5px] py-[1px] font-mono text-[10px] cursor-pointer whitespace-nowrap`}
+                >
+                  {resolvedIds.length > 2
+                    ? `Ctrl ${id}`
+                    : splitBrainMode
+                    ? `Control Brain ${id}`
+                    : `Control ${id}`}
+                </button>
+              ))}
+            </span>
+          )}
           <span className="text-[#bbb] tabular-nums">
             Frames: <span className="text-[#fff]">{liveSteps}</span>
           </span>
           <span className="text-[#bbb] tabular-nums">
             Fit: <span className="text-[#0dd]">{liveFitness}</span>
           </span>
-          {engine.params.simMode === 'restaurant' && (
-            <span className="text-[#bbb] tabular-nums">
-              Served: <span className="text-[#34d399]">{engine.restaurant.customersServed}</span>
-              {' · '}
-              Left: <span className="text-[#f87171]">{engine.restaurant.customersLeft}</span>
-            </span>
-          )}
           <span className="text-[#888] tabular-nums">Saved: {demos.length}</span>
         </div>
 
@@ -462,8 +546,8 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
         )}
       </div>
 
-      {/* Bottom Floating Analog Control Stick */}
-      <div className="w-full max-w-[360px] flex flex-col items-center">
+      {/* Bottom Floating Analog Control Stick + Optional 3rd-Output Hold Trigger */}
+      <div className="w-full max-w-[440px] flex items-stretch gap-[6px]">
         <canvas
           ref={stickCanvasRef}
           id="humanStickCanvas"
@@ -520,8 +604,47 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
               stickDragRef.current = null;
             }
           }}
-          className="w-full h-auto block bg-[#0b0b0b] border border-[#333] touch-none cursor-grab active:cursor-grabbing"
+          className="flex-1 min-w-0 h-auto block bg-[#0b0b0b] border border-[#333] touch-none cursor-grab active:cursor-grabbing"
         />
+
+        {(activeOutputCfg === 'sprint_burst' ||
+          activeOutputCfg === 'dash_3d' ||
+          activeOutputCfg === 'drift_3d' ||
+          activeOutputCfg === 'throttle_3d') && (
+          <button
+            id="btnDemoAuxHold"
+            type="button"
+            onPointerDown={(e) => {
+              e.currentTarget.setPointerCapture?.(e.pointerId);
+              auxHoldRef.current = true;
+              setAuxHeldUi(true);
+            }}
+            onPointerUp={() => {
+              auxHoldRef.current = false;
+              setAuxHeldUi(false);
+            }}
+            onPointerCancel={() => {
+              auxHoldRef.current = false;
+              setAuxHeldUi(false);
+            }}
+            className={`${
+              auxHeldUi
+                ? 'bg-[#0b5a5a] border-[#0ff] text-[#fff]'
+                : 'bg-[#141414] border-[#3a3a3a] text-[#ccc] hover:bg-[#1e1e1e]'
+            } border px-[10px] font-mono text-[11px] flex flex-col items-center justify-center gap-[3px] min-w-[78px] shrink-0 select-none touch-none cursor-pointer`}
+          >
+            <span className="font-bold">
+              {activeOutputCfg === 'sprint_burst'
+                ? 'SPRINT'
+                : activeOutputCfg === 'dash_3d'
+                ? 'DASH'
+                : activeOutputCfg === 'drift_3d'
+                ? 'DRIFT'
+                : 'CREEP'}
+            </span>
+            <span className="text-[9px] text-[#888]">Space/Shift</span>
+          </button>
+        )}
       </div>
 
       {/* Modal Overlay for Saved Demo Files & Imitation Training */}
@@ -532,6 +655,12 @@ export const HumanDemoOverlay: React.FC<HumanDemoOverlayProps> = ({
             layers={layers}
             neurons={neurons}
             activation={activation}
+            outputConfig={activeOutputCfg}
+            dualAgentMode={dualAgentMode}
+            splitBrainMode={splitBrainMode}
+            activeBrainIds={resolvedIds}
+            targetAgent={activeAgentId}
+            onSelectTargetAgent={handleSwitchControlledAgent}
             onDeleteDemo={onDeleteDemo}
             onClearAllDemos={onClearAllDemos}
             onDownloadAllDemos={onDownloadAllDemos}

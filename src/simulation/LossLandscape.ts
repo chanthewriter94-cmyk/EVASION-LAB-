@@ -1,11 +1,18 @@
-import { EvasionEngine, SIM_HEIGHT, SIM_WIDTH, SimParams } from './EvasionEngine';
-import { NeuralNetwork } from './NeuralNetwork';
 import {
-  RESTAURANT_STATIONS,
-  RESTAURANT_TABLES,
-  RestaurantState,
-  cloneRestaurantState,
-} from './RestaurantMode';
+  AgentBrainConfig,
+  AgentId,
+  ALL_BRAIN_IDS,
+  EvasionEngine,
+  EXTRA_BRAIN_IDS,
+  ExtraBrainId,
+  SIM_HEIGHT,
+  SIM_WIDTH,
+  SimMode,
+  SimParams,
+  SplitBrainMergeMode,
+  TelepathyBridgeMode,
+} from './EvasionEngine';
+import { getOutputConfigSpec, NeuralNetwork } from './NeuralNetwork';
 
 export type LandscapeMode = 'spatial' | 'weight';
 export type LandscapeView = '1d' | '2d' | '3d' | '2d+3d';
@@ -217,8 +224,13 @@ function createInterpolatedNetwork(
 export function scanSpatialLandscape(
   engine: EvasionEngine,
   gridW = 25,
-  gridH = 17
+  gridH = 17,
+  agentId: AgentId = engine.activeInspectAgent
 ): LandscapeData {
+  const activeIds = engine.getActiveBrainIds();
+  const targetId: AgentId = activeIds.includes(agentId) ? agentId : 'A';
+  const targetPlayer = engine.getTargetPlayer(targetId);
+
   const values: number[][] = [];
   const hitMask: boolean[][] = [];
   let minFitness = Infinity;
@@ -231,7 +243,7 @@ export function scanSpatialLandscape(
     const hitRow: boolean[] = [];
     for (let col = 0; col < gridW; col++) {
       const px = pad + (col / Math.max(1, gridW - 1)) * (SIM_WIDTH - pad * 2);
-      const res = engine.evaluateSpatialSample(px, py);
+      const res = engine.evaluateSpatialSample(px, py, targetId);
       valRow.push(res.fitness);
       hitRow.push(res.hit);
       if (res.fitness < minFitness) minFitness = res.fitness;
@@ -246,35 +258,21 @@ export function scanSpatialLandscape(
   for (let i = 0; i < sliceSamples; i++) {
     const t = i / (sliceSamples - 1);
     const px = pad + t * (SIM_WIDTH - pad * 2);
-    const res = engine.evaluateSpatialSample(px, engine.player.y);
+    const res = engine.evaluateSpatialSample(px, targetPlayer.y, targetId);
     slice1D.push({ t: px, fitness: res.fitness, hit: res.hit });
   }
 
-  const centerRes = engine.evaluateSpatialSample(engine.player.x, engine.player.y);
-  const markerU = Math.max(0, Math.min(1, (engine.player.x - pad) / (SIM_WIDTH - pad * 2)));
-  const markerV = Math.max(0, Math.min(1, (engine.player.y - pad) / (SIM_HEIGHT - pad * 2)));
+  const centerRes = engine.evaluateSpatialSample(targetPlayer.x, targetPlayer.y, targetId);
+  const markerU = Math.max(0, Math.min(1, (targetPlayer.x - pad) / (SIM_WIDTH - pad * 2)));
+  const markerV = Math.max(0, Math.min(1, (targetPlayer.y - pad) / (SIM_HEIGHT - pad * 2)));
 
-  const markers: LandscapeMarker[] =
-    engine.params.simMode === 'restaurant'
-      ? [
-          ...RESTAURANT_STATIONS.map((s) => ({
-            u: Math.max(0, Math.min(1, (s.zoneCx - pad) / (SIM_WIDTH - pad * 2))),
-            v: Math.max(0, Math.min(1, (s.zoneCy - pad) / (SIM_HEIGHT - pad * 2))),
-            isBest: true,
-          })),
-          ...RESTAURANT_TABLES.map((t) => ({
-            u: Math.max(0, Math.min(1, (t.zoneCx - pad) / (SIM_WIDTH - pad * 2))),
-            v: Math.max(0, Math.min(1, (t.zoneCy - pad) / (SIM_HEIGHT - pad * 2))),
-            isEnemy: false,
-          })),
-        ]
-      : engine.enemies
-          .filter((e) => !e.spawnDelay || e.spawnDelay <= 0)
-          .map((e) => ({
-            u: Math.max(0, Math.min(1, (e.x - pad) / (SIM_WIDTH - pad * 2))),
-            v: Math.max(0, Math.min(1, (e.y - pad) / (SIM_HEIGHT - pad * 2))),
-            isEnemy: true,
-          }));
+  const markers: LandscapeMarker[] = engine.enemies
+    .filter((e) => !e.spawnDelay || e.spawnDelay <= 0)
+    .map((e) => ({
+      u: Math.max(0, Math.min(1, (e.x - pad) / (SIM_WIDTH - pad * 2))),
+      v: Math.max(0, Math.min(1, (e.y - pad) / (SIM_HEIGHT - pad * 2))),
+      isEnemy: true,
+    }));
 
   if (!Number.isFinite(minFitness)) minFitness = 0;
   if (!Number.isFinite(maxFitness)) maxFitness = 1;
@@ -290,7 +288,11 @@ export function scanSpatialLandscape(
     maxFitness,
     centerFitness: centerRes.fitness,
     slice1D,
-    slice1DLabel: `Arena X @ y=${Math.round(engine.player.y)}`,
+    slice1DLabel: engine.splitBrainMode
+      ? `Brain ${targetId} X @ y=${Math.round(targetPlayer.y)}`
+      : engine.dualAgentMode
+      ? `Agent ${targetId} X @ y=${Math.round(targetPlayer.y)}`
+      : `Arena X @ y=${Math.round(targetPlayer.y)}`,
     markerNorm: { u: markerU, v: markerV },
     markers,
     progress: 1,
@@ -300,14 +302,27 @@ export function scanSpatialLandscape(
 }
 
 export class WeightSpaceScanner {
+  private agentId: AgentId;
+  private simMode: SimMode;
+  private dualMode: boolean;
+  private splitBrainMode: boolean;
+  private splitBrainCount: number;
+  private hasTwo: boolean;
+  private splitBrainMergeMode: SplitBrainMergeMode;
+  private bridgeMode: TelepathyBridgeMode;
+  private agentBParams: AgentBrainConfig;
+  private extraConfigs: Record<ExtraBrainId, AgentBrainConfig>;
   private baseNet: NeuralNetwork;
   private bestNet: NeuralNetwork | null;
+  private partnerNets: Partial<Record<AgentId, NeuralNetwork>>;
   private params: SimParams;
   private d1: WeightTensor;
   private d2: WeightTensor;
   private seedPlayer: { x: number; y: number; vx: number; vy: number };
+  private seedPlayerB: { x: number; y: number; vx: number; vy: number };
+  private seedPrevOutputsA: number[];
+  private seedPrevOutputsB: number[];
   private seedEnemies: { x: number; y: number; spawnDelay: number; entered: boolean; speedPct?: number }[];
-  private seedRestaurant: RestaurantState | null;
   private gridSize: number;
   private rolloutSteps: number;
   private span: number;
@@ -317,53 +332,98 @@ export class WeightSpaceScanner {
 
   data: LandscapeData;
 
-  constructor(engine: EvasionEngine, gridSize = 13, rolloutSteps = 110, span = 1.2) {
+  constructor(
+    engine: EvasionEngine,
+    gridSize = 13,
+    rolloutSteps = 110,
+    span = 1.2,
+    agentId: AgentId = engine.activeInspectAgent
+  ) {
+    this.simMode = engine.simMode;
+    this.dualMode = engine.dualAgentMode;
+    this.splitBrainMode = engine.splitBrainMode;
+    this.splitBrainCount = engine.splitBrainCount;
+    this.hasTwo = engine.hasTwoBrains();
+    this.splitBrainMergeMode = engine.splitBrainMergeMode;
+    const activeIds = engine.getActiveBrainIds();
+    this.agentId = activeIds.includes(agentId) ? agentId : 'A';
+    this.bridgeMode = engine.telepathyBridgeMode;
+    this.agentBParams = { ...engine.agentBParams };
+    this.extraConfigs = {
+      C: { ...engine.extraBrains.C.config },
+      D: { ...engine.extraBrains.D.config },
+      E: { ...engine.extraBrains.E.config },
+    };
     this.gridSize = gridSize;
     this.rolloutSteps = rolloutSteps;
     this.span = span;
     this.generation = engine.generation;
     this.params = { ...engine.params };
-    this.baseNet = (engine.agent ?? engine.bestAgent ?? new NeuralNetwork(104, 1, 16, 2, 'tanh')).clone();
-    this.bestNet =
-      engine.bestAgent && engine.agent && engine.bestAgent !== engine.agent
-        ? engine.bestAgent.clone()
-        : null;
 
-    if (engine.params.simMode === 'restaurant') {
-      this.seedPlayer = { ...engine.player };
-      this.seedEnemies = [];
-      this.seedRestaurant = cloneRestaurantState(engine.restaurant);
-    } else {
-      this.seedRestaurant = null;
-      // Seed deterministic enemy ring / snapshot from current episode or balanced ring
-      this.seedPlayer = { x: SIM_WIDTH / 2, y: SIM_HEIGHT / 2, vx: 0, vy: 0 };
-      const active = engine.enemies.filter((e) => !e.spawnDelay || e.spawnDelay <= 0);
-      if (active.length > 0) {
-        this.seedEnemies = active.map((e) => ({
-          x: e.x,
-          y: e.y,
-          spawnDelay: 0,
-          entered: true,
-          speedPct: e.speedPct,
-        }));
-        this.seedPlayer = { ...engine.player };
-      } else {
-        const count = engine.params.numEnemies;
-        this.seedEnemies = [];
-        for (let i = 0; i < count; i++) {
-          const ang = (i / Math.max(1, count)) * Math.PI * 2 + 0.35;
-          this.seedEnemies.push({
-            x: Math.max(16, Math.min(SIM_WIDTH - 16, SIM_WIDTH * 0.5 + Math.cos(ang) * 150)),
-            y: Math.max(16, Math.min(SIM_HEIGHT - 16, SIM_HEIGHT * 0.5 + Math.sin(ang) * 120)),
-            spawnDelay: 0,
-            entered: true,
-            speedPct: engine.params.enemySpeedPct,
-          });
+    const targetAgent = engine.getTargetAgent(this.agentId);
+    const targetBest = engine.getTargetBestAgent(this.agentId);
+    const fallbackOutSize = getOutputConfigSpec(engine.getOutputConfig(this.agentId)).outputSize;
+    this.baseNet = (
+      targetAgent ??
+      targetBest ??
+      new NeuralNetwork(108, 1, 16, fallbackOutSize, 'tanh')
+    ).clone();
+    this.bestNet =
+      targetBest && targetAgent && targetBest !== targetAgent ? targetBest.clone() : null;
+
+    this.partnerNets = {};
+    if (this.hasTwo) {
+      for (const id of activeIds) {
+        if (id === this.agentId) continue;
+        const partnerSrc = engine.getTargetBestAgent(id) ?? engine.getTargetAgent(id);
+        if (partnerSrc) {
+          this.partnerNets[id] = partnerSrc.clone();
         }
       }
     }
 
-    const basisSeed = 1337 + engine.generation * 97 + this.baseNet.weights.length * 17;
+    // Seed deterministic enemy ring / snapshot from current episode or balanced ring
+    this.seedPlayer = {
+      x: this.dualMode ? SIM_WIDTH * 0.35 : SIM_WIDTH / 2,
+      y: SIM_HEIGHT / 2,
+      vx: 0,
+      vy: 0,
+    };
+    this.seedPlayerB = { x: SIM_WIDTH * 0.65, y: SIM_HEIGHT / 2, vx: 0, vy: 0 };
+    this.seedPrevOutputsA = [...engine.prevRawOutputsA];
+    this.seedPrevOutputsB = [...engine.prevRawOutputsB];
+
+    const active = engine.enemies.filter((e) => !e.spawnDelay || e.spawnDelay <= 0);
+    if (active.length > 0) {
+      this.seedEnemies = active.map((e) => ({
+        x: e.x,
+        y: e.y,
+        spawnDelay: 0,
+        entered: true,
+        speedPct: e.speedPct,
+      }));
+      this.seedPlayer = { ...engine.player };
+      this.seedPlayerB = { ...engine.playerB };
+    } else {
+      const count = engine.params.numEnemies;
+      this.seedEnemies = [];
+      for (let i = 0; i < count; i++) {
+        const ang = (i / Math.max(1, count)) * Math.PI * 2 + 0.35;
+        this.seedEnemies.push({
+          x: Math.max(16, Math.min(SIM_WIDTH - 16, SIM_WIDTH * 0.5 + Math.cos(ang) * 150)),
+          y: Math.max(16, Math.min(SIM_HEIGHT - 16, SIM_HEIGHT * 0.5 + Math.sin(ang) * 120)),
+          spawnDelay: 0,
+          entered: true,
+          speedPct: engine.params.enemySpeedPct,
+        });
+      }
+    }
+
+    const basisSeed =
+      1337 +
+      engine.generation * 97 +
+      this.baseNet.weights.length * 17 +
+      ALL_BRAIN_IDS.indexOf(this.agentId) * 53;
     const { d1, d2 } = buildFilterNormalizedDirections(this.baseNet, basisSeed);
     this.d1 = d1;
     this.d2 = d2;
@@ -376,7 +436,8 @@ export class WeightSpaceScanner {
     }
 
     const popMarkers: LandscapeMarker[] = [];
-    for (const member of engine.population) {
+    const targetPop = engine.getTargetPopulation(this.agentId);
+    for (const member of targetPop) {
       const proj = projectNetworkOntoBasis(member, this.baseNet, d1, d2);
       const u = (proj.alpha + span) / (span * 2);
       const v = (proj.beta + span) / (span * 2);
@@ -404,7 +465,9 @@ export class WeightSpaceScanner {
       maxFitness: 0,
       centerFitness: 0,
       slice1D: [],
-      slice1DLabel: this.bestNet ? 'Current (0) -> Best (1)' : `α Slice [-${span}, +${span}]`,
+      slice1DLabel: this.bestNet
+        ? `${this.hasTwo ? `[${this.splitBrainMode ? 'Brain ' : ''}${this.agentId}] ` : ''}Current (0) -> Best (1)`
+        : `${this.hasTwo ? `[${this.splitBrainMode ? 'Brain ' : ''}${this.agentId}] ` : ''}α Slice [-${span}, +${span}]`,
       markerNorm: { u: 0.5, v: 0.5 },
       markers: popMarkers,
       progress: 0,
@@ -419,17 +482,74 @@ export class WeightSpaceScanner {
 
   private evaluateNet(net: NeuralNetwork): { fitness: number; hit: boolean } {
     const probe = new EvasionEngine(this.params);
-    probe.population = [net];
-    probe.popIndex = 0;
-    probe.agent = net;
-    probe.bestAgent = null;
-    probe.player = { ...this.seedPlayer };
-    probe.enemies = this.seedEnemies.map((e) => ({ ...e }));
-    if (this.seedRestaurant) {
-      probe.restaurant = cloneRestaurantState(this.seedRestaurant);
+    probe.simMode = this.simMode;
+    probe.dualAgentMode = this.dualMode;
+    probe.splitBrainMode = this.splitBrainMode;
+    probe.splitBrainCount = this.splitBrainCount;
+    probe.splitBrainMergeMode = this.splitBrainMergeMode;
+    probe.telepathyBridgeMode = this.bridgeMode;
+    probe.agentBParams = { ...this.agentBParams };
+    for (const id of EXTRA_BRAIN_IDS) {
+      probe.extraBrains[id].config = { ...this.extraConfigs[id] };
     }
+    probe.popIndex = 0;
+
+    if (this.hasTwo) {
+      for (const id of probe.getActiveBrainIds()) {
+        let assigned: NeuralNetwork;
+        if (id === this.agentId) {
+          assigned = net;
+        } else {
+          const existing = this.partnerNets[id];
+          if (existing) {
+            assigned = existing.clone();
+          } else {
+            const cfg = probe.getTargetBrainConfig(id);
+            const outSize = getOutputConfigSpec(cfg.outputConfig).outputSize;
+            assigned = new NeuralNetwork(
+              108,
+              cfg.hiddenLayersCount,
+              cfg.neuronsPerLayer,
+              outSize,
+              cfg.activationType
+            );
+          }
+        }
+        if (id === 'A') {
+          probe.population = [assigned];
+          probe.agent = assigned;
+          probe.bestAgent = null;
+        } else if (id === 'B') {
+          probe.populationB = [assigned];
+          probe.agentB = assigned;
+          probe.bestAgentB = null;
+        } else {
+          const slot = probe.extraBrains[id];
+          slot.population = [assigned];
+          slot.popPairingOrder = [0];
+          slot.agent = assigned;
+          slot.bestAgent = null;
+          slot.splitFitness = 0;
+          slot.bestFitness = -Infinity;
+          slot.headingRad = 0;
+          slot.stamina = 1;
+          slot.sprinting = false;
+          slot.splitVel = { vx: 0, vy: 0 };
+        }
+      }
+    } else {
+      probe.population = [net];
+      probe.agent = net;
+      probe.bestAgent = null;
+    }
+
+    probe.player = { ...this.seedPlayer };
+    probe.playerB = { ...this.seedPlayerB };
+    probe.enemies = this.seedEnemies.map((e) => ({ ...e }));
     probe.stepCount = 0;
     probe.currentFitness = 0;
+    probe.splitBrainFitnessA = 0;
+    probe.splitBrainFitnessB = 0;
     probe.prevVx = 0;
     probe.prevVy = 0;
     probe.emaVx = 0;
@@ -438,6 +558,16 @@ export class WeightSpaceScanner {
     probe.emaPy = probe.player.y;
     probe.collectedSplitGaps = [];
     probe.splitGapHistory = [];
+    probe.prevVxB = 0;
+    probe.prevVyB = 0;
+    probe.emaVxB = 0;
+    probe.emaVyB = 0;
+    probe.emaPxB = probe.playerB.x;
+    probe.emaPyB = probe.playerB.y;
+    probe.collectedSplitGapsB = [];
+    probe.splitGapHistoryB = [];
+    probe.prevRawOutputsA = [...this.seedPrevOutputsA];
+    probe.prevRawOutputsB = [...this.seedPrevOutputsB];
 
     let hit = false;
     for (let s = 0; s < this.rolloutSteps; s++) {
@@ -447,7 +577,12 @@ export class WeightSpaceScanner {
         return { fitness: net.fitness, hit };
       }
     }
-    return { fitness: probe.currentFitness, hit };
+    return {
+      fitness: this.splitBrainMode
+        ? probe.getSplitBrainFitness(this.agentId)
+        : probe.currentFitness,
+      hit,
+    };
   }
 
   stepRows(maxRows = 2): LandscapeData {

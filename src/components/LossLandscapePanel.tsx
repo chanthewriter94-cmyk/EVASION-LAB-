@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { EvasionEngine, SIM_HEIGHT, SIM_WIDTH } from '../simulation/EvasionEngine';
+import { AgentId, EvasionEngine, SIM_HEIGHT, SIM_WIDTH } from '../simulation/EvasionEngine';
 import {
   drawLandscape1D,
   drawLandscape2D,
@@ -9,6 +9,7 @@ import {
   LandscapeMode,
   LandscapeView,
 } from '../simulation/LossLandscape';
+import { BRAIN_UI_STYLES } from './brainStyles';
 
 interface LossLandscapePanelProps {
   engine: EvasionEngine;
@@ -21,6 +22,11 @@ interface LossLandscapePanelProps {
   data: LandscapeData | null;
   activeRewardLabels: string[];
   onRescan: () => void;
+  dualAgentMode?: boolean;
+  splitBrainMode?: boolean;
+  activeBrainIds?: AgentId[];
+  inspectAgent?: AgentId;
+  onSelectAgent?: (id: AgentId) => void;
 }
 
 const CANVAS_W = 554;
@@ -43,7 +49,19 @@ export const LossLandscapePanel: React.FC<LossLandscapePanelProps> = ({
   data,
   activeRewardLabels,
   onRescan,
+  dualAgentMode = false,
+  splitBrainMode = false,
+  activeBrainIds,
+  inspectAgent = 'A',
+  onSelectAgent,
 }) => {
+  const resolvedIds = activeBrainIds ?? engine.getActiveBrainIds();
+  const hasTwoBrains = resolvedIds.length > 1 || dualAgentMode || splitBrainMode;
+  const targetId: AgentId = hasTwoBrains
+    ? resolvedIds.includes(inspectAgent)
+      ? inspectAgent
+      : resolvedIds[0] ?? 'A'
+    : 'A';
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [yaw, setYaw] = useState<number>(0.68);
   const [pitch, setPitch] = useState<number>(0.58);
@@ -160,9 +178,7 @@ export const LossLandscapePanel: React.FC<LossLandscapePanelProps> = ({
 
   const progressPct = data ? Math.round(data.progress * 100) : 0;
   const rewardSummary =
-    engine.params.simMode === 'restaurant'
-      ? 'Order +0.8/px & +8 pad · Vectors +0.6/px · Pickup +25 · Serve +80 · Wait -0.12 · Leave -200'
-      : activeRewardLabels.length > 0
+    activeRewardLabels.length > 0
       ? activeRewardLabels.slice(0, 6).join(', ') +
         (activeRewardLabels.length > 6 ? ` +${activeRewardLabels.length - 6}` : '')
       : 'None (Survival steps only)';
@@ -170,7 +186,7 @@ export const LossLandscapePanel: React.FC<LossLandscapePanelProps> = ({
   return (
     <div
       id="lossLandscapePanel"
-      className="w-[95%] max-w-[570px] mx-auto bg-[#0a0a0a] border border-[#333] p-[8px] font-mono text-[11px] text-[#ddd]"
+      className="w-full bg-[#0a0a0a] border border-[#2a2a2a] p-[8px] font-mono text-[11px] text-[#ddd] overflow-hidden"
     >
       <div className="flex items-center justify-between gap-[6px] flex-wrap mb-[6px]">
         <div className="flex items-center gap-[4px] flex-wrap">
@@ -247,11 +263,33 @@ export const LossLandscapePanel: React.FC<LossLandscapePanelProps> = ({
       </div>
 
       <div className="mb-[6px] px-[6px] py-[3px] bg-[#141414] border border-[#2a2a2a] flex items-center justify-between gap-[6px] flex-wrap text-[10px] text-[#999]">
-        <span>
-          Rewards ({activeRewardLabels.length}): <span className="text-[#0cc]">{rewardSummary}</span>
-        </span>
+        <div className="flex items-center gap-[6px] flex-wrap">
+          {hasTwoBrains && onSelectAgent && (
+            <span className="inline-flex border border-[#3a3a3a]">
+              {resolvedIds.map((id, idx) => (
+                <button
+                  key={id}
+                  type="button"
+                  title={`${splitBrainMode ? 'Brain' : 'Agent'} ${id} (${BRAIN_UI_STYLES[id].colorName})`}
+                  onClick={() => onSelectAgent(id)}
+                  className={`${
+                    targetId === id
+                      ? BRAIN_UI_STYLES[id].activeTabClass
+                      : 'bg-[#161616] text-[#999] hover:bg-[#242424]'
+                  } border-none ${idx > 0 ? 'border-l border-[#3a3a3a]' : ''} px-[5px] py-[1px] font-mono text-[10px] cursor-pointer whitespace-nowrap`}
+                >
+                  {resolvedIds.length > 2 ? id : `${splitBrainMode ? 'Brain' : 'Agent'} ${id}`}
+                </button>
+              ))}
+            </span>
+          )}
+          <span>
+            Rewards ({activeRewardLabels.length}): <span className="text-[#0cc]">{rewardSummary}</span>
+          </span>
+        </div>
         <span className="tabular-nums text-[#888]">
-          Gen {engine.generation} | {mode === 'weight' ? `${data?.evalSteps ?? 110}-step rollouts` : 'Live Arena Probe'}
+          {hasTwoBrains ? `[${splitBrainMode ? 'Brain' : 'Agent'} ${targetId}] | ` : ''}Gen {engine.generation} |{' '}
+          {mode === 'weight' ? `${data?.evalSteps ?? 110}-step rollouts` : 'Live Arena Probe'}
         </span>
       </div>
 

@@ -1,13 +1,18 @@
-import { EnemySpeedMode, SimMode, SpawnMode } from './EvasionEngine';
-import { NeuralNetwork } from './NeuralNetwork';
+import { EnemySpeedMode, SpawnMode } from './EvasionEngine';
+import {
+  getOutputConfigSpec,
+  NeuralNetwork,
+  OUTPUT_CONFIG_OPTIONS,
+  OutputConfig,
+} from './NeuralNetwork';
 
 export interface DemoFrame {
   inputs: number[];
-  action: [number, number];
+  action: number[];
 }
 
 export interface DemoEnvSummary {
-  simMode?: SimMode;
+  outputConfig?: OutputConfig;
   numEnemies: number;
   enemySpeedPct: number;
   enemySpeedMode: EnemySpeedMode;
@@ -92,17 +97,26 @@ function normalizeDemoRecord(raw: unknown, fallbackIdx: number): HumanDemoRecord
   for (const f of r.frames) {
     if (!f || typeof f !== 'object') continue;
     const fr = f as Record<string, unknown>;
-    if (!Array.isArray(fr.inputs) || fr.inputs.length !== 104 || !Array.isArray(fr.action) || fr.action.length < 2) {
+    if (
+      !Array.isArray(fr.inputs) ||
+      (fr.inputs.length !== 104 && fr.inputs.length !== 108) ||
+      !Array.isArray(fr.action) ||
+      fr.action.length < 2
+    ) {
       continue;
     }
-    const ax = Number(fr.action[0]);
-    const ay = Number(fr.action[1]);
-    if (!Number.isFinite(ax) || !Number.isFinite(ay)) continue;
+    const action: number[] = [];
+    for (let k = 0; k < fr.action.length; k++) {
+      const val = Number(fr.action[k]);
+      if (!Number.isFinite(val)) break;
+      action.push(val);
+    }
+    if (action.length < 2) continue;
     const inputs = fr.inputs.map((v) => {
       const n = Number(v);
       return Number.isFinite(n) ? n : 0;
     });
-    frames.push({ inputs, action: [ax, ay] });
+    frames.push({ inputs, action });
   }
 
   if (frames.length === 0) return null;
@@ -111,8 +125,10 @@ function normalizeDemoRecord(raw: unknown, fallbackIdx: number): HumanDemoRecord
     r.envSummary && typeof r.envSummary === 'object'
       ? (r.envSummary as Record<string, unknown>)
       : {};
+  const validOutputConfigs = new Set(OUTPUT_CONFIG_OPTIONS.map((o) => o.value));
+  const rawOutCfg = typeof envRaw.outputConfig === 'string' ? (envRaw.outputConfig as OutputConfig) : undefined;
   const envSummary: DemoEnvSummary = {
-    simMode: envRaw.simMode === 'restaurant' ? 'restaurant' : 'evasion',
+    ...(rawOutCfg && validOutputConfigs.has(rawOutCfg) ? { outputConfig: rawOutCfg } : {}),
     numEnemies:
       typeof envRaw.numEnemies === 'number' && Number.isFinite(envRaw.numEnemies)
         ? envRaw.numEnemies
@@ -174,20 +190,206 @@ export function parseDemoImportData(data: unknown): HumanDemoRecording[] {
     if (item) parsed.push(item);
   }
   if (parsed.length === 0) {
-    throw new Error('No valid demonstration frames (104 inputs + 2 actions) found.');
+    throw new Error('No valid demonstration frames (104 or 108 inputs + 2 actions) found.');
   }
   return parsed;
+}
+
+function mapDemoActionToTargetConfig(
+  frame: DemoFrame,
+  sourceConfig: OutputConfig | undefined,
+  targetConfig: OutputConfig,
+  outSize: number
+): number[] {
+  const src = sourceConfig ?? 'cartesian_2d';
+  if (src === targetConfig && frame.action.length >= outSize) {
+    return frame.action.slice(0, outSize);
+  }
+
+  const a0 = frame.action[0] ?? 0;
+  const a1 = frame.action[1] ?? 0;
+  const a2 = frame.action[2];
+  const a3 = frame.action[3];
+  const clamp1 = (v: number) => Math.max(-1, Math.min(1, v));
+
+  const vxIn = frame.inputs[2] ?? 0;
+  const vyIn = frame.inputs[3] ?? 0;
+  const velHeading = Math.hypot(vxIn, vyIn) > 0.05 ? Math.atan2(vyIn, vxIn) : 0;
+
+  let wx = a0;
+  let wy = a1;
+  if (src === 'polar_2d' || src === 'car_2d' || src === 'asteroids_2d') {
+    const h = velHeading + clamp1(a0) * 0.18;
+    const thrustVal = src === 'asteroids_2d' ? Math.max(0, clamp1(a1)) : clamp1(a1);
+    wx = Math.cos(h) * thrustVal;
+    wy = Math.sin(h) * thrustVal;
+  } else if (src === 'compass_2d') {
+    const h = clamp1(a0) * Math.PI;
+    const spd = Math.max(0, Math.min(1, (clamp1(a1) + 1) * 0.5));
+    wx = Math.cos(h) * spd;
+    wy = Math.sin(h) * spd;
+  } else if (src === 'etch_2d') {
+    if (Math.abs(a0) >= Math.abs(a1)) {
+      wx = clamp1(a0);
+      wy = 0;
+    } else {
+      wx = 0;
+      wy = clamp1(a1);
+    }
+  } else if (src === 'polar_3d') {
+    const h = velHeading + clamp1(a0) * 0.16;
+    const fx = Math.cos(h);
+    const fy = Math.sin(h);
+    const rx = -fy;
+    const ry = fx;
+    wx = fx * clamp1(a1) + rx * clamp1(a2 ?? 0);
+    wy = fy * clamp1(a1) + ry * clamp1(a2 ?? 0);
+  } else if (src === 'spin_frame_3d') {
+    const h = velHeading + clamp1(a2 ?? 0) * 0.16;
+    const cosH = Math.cos(h);
+    const sinH = Math.sin(h);
+    wx = clamp1(a0) * cosH - clamp1(a1) * sinH;
+    wy = clamp1(a0) * sinH + clamp1(a1) * cosH;
+  } else if (src === 'hybrid_4d') {
+    const h = velHeading + clamp1(a2 ?? 0) * 0.16;
+    wx = clamp1(a0) + Math.cos(h) * clamp1(a3 ?? 0);
+    wy = clamp1(a1) + Math.sin(h) * clamp1(a3 ?? 0);
+  } else if (src === 'thrusters_4d') {
+    wx = Math.max(0, clamp1(a0)) - Math.max(0, clamp1(a1));
+    wy = Math.max(0, clamp1(a2 ?? 0)) - Math.max(0, clamp1(a3 ?? 0));
+  } else {
+    wx = clamp1(a0);
+    wy = clamp1(a1);
+  }
+
+  const wMag = Math.hypot(wx, wy);
+  if (wMag > 1) {
+    wx /= wMag;
+    wy /= wMag;
+  }
+
+  if (targetConfig === 'cartesian_2d') {
+    return [wx, wy];
+  }
+
+  if (targetConfig === 'etch_2d') {
+    return Math.abs(wx) >= Math.abs(wy) ? [wx, 0] : [0, wy];
+  }
+
+  if (targetConfig === 'compass_2d') {
+    const mag = Math.min(1, Math.hypot(wx, wy));
+    if (mag <= 0.05) return [0, -1];
+    return [clamp1(Math.atan2(wy, wx) / Math.PI), clamp1(mag * 2 - 1)];
+  }
+
+  if (targetConfig === 'sprint_burst' || targetConfig === 'dash_3d') {
+    const mag = Math.hypot(wx, wy);
+    const aux =
+      (src === 'sprint_burst' || src === 'dash_3d') && typeof a2 === 'number'
+        ? clamp1(a2)
+        : mag > 0.92
+        ? 0.55
+        : -0.8;
+    return [wx, wy, aux];
+  }
+
+  if (targetConfig === 'throttle_3d') {
+    const mag = Math.min(1, Math.hypot(wx, wy));
+    const ux = mag > 1e-4 ? wx / mag : 0;
+    const uy = mag > 1e-4 ? wy / mag : 0;
+    const spd = src === 'throttle_3d' && typeof a2 === 'number' ? clamp1(a2) : mag * 2 - 1;
+    return [ux, uy, clamp1(spd)];
+  }
+
+  if (targetConfig === 'drift_3d') {
+    const grip = src === 'drift_3d' && typeof a2 === 'number' ? clamp1(a2) : 0.75;
+    return [wx, wy, grip];
+  }
+
+  if (targetConfig === 'thrusters_4d') {
+    return [
+      wx > 0 ? wx : -0.5,
+      wx < 0 ? -wx : -0.5,
+      wy > 0 ? wy : -0.5,
+      wy < 0 ? -wy : -0.5,
+    ];
+  }
+
+  const mag = Math.min(1, Math.hypot(wx, wy));
+  const heading = Math.hypot(vxIn, vyIn) > 0.05 ? velHeading : Math.atan2(wy, wx);
+  let turn = 0;
+  let thrust = 0;
+  let strafe = 0;
+  let lx = 0;
+  let ly = 0;
+  if (mag > 0.05) {
+    let diff = Math.atan2(wy, wx) - heading;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    turn = clamp1(diff / 0.32);
+    const fx = Math.cos(heading);
+    const fy = Math.sin(heading);
+    const rx = -fy;
+    const ry = fx;
+    thrust = clamp1(wx * fx + wy * fy);
+    strafe = clamp1(wx * rx + wy * ry);
+    lx = clamp1(wx * fx + wy * fy);
+    ly = clamp1(-wx * fy + wy * fx);
+  }
+
+  if (targetConfig === 'polar_2d') {
+    return [turn, thrust];
+  }
+  if (targetConfig === 'car_2d') {
+    if (mag <= 0.05) return [0, 0];
+    let diff = Math.atan2(wy, wx) - heading;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    if (Math.cos(diff) >= -0.25) {
+      return [clamp1(diff / 0.32), mag];
+    }
+    let revDiff = Math.atan2(wy, wx) - (heading + Math.PI);
+    while (revDiff > Math.PI) revDiff -= Math.PI * 2;
+    while (revDiff < -Math.PI) revDiff += Math.PI * 2;
+    return [clamp1(-revDiff / 0.32), -mag];
+  }
+  if (targetConfig === 'asteroids_2d') {
+    if (mag <= 0.05) return [0, 0];
+    let diff = Math.atan2(wy, wx) - heading;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    const align = Math.cos(diff);
+    return [turn, align > 0.15 ? clamp1(mag * align) : 0];
+  }
+  if (targetConfig === 'spin_frame_3d') {
+    return [lx, ly, turn];
+  }
+  if (targetConfig === 'hybrid_4d') {
+    return [wx * 0.65, wy * 0.65, turn, thrust * 0.65];
+  }
+  return [turn, thrust, strafe];
 }
 
 export function trainNetworkOnDemos(
   baseNet: NeuralNetwork,
   demos: HumanDemoRecording[],
-  config: TrainingConfig = { epochs: 40, learningRate: 0.004, batchSize: 64 }
+  config: TrainingConfig = { epochs: 40, learningRate: 0.004, batchSize: 64 },
+  targetOutputConfig: OutputConfig = 'cartesian_2d'
 ): { network: NeuralNetwork; result: TrainingResult } {
-  const allFrames: DemoFrame[] = [];
+  const allFrames: { inputs: number[]; target: number[] }[] = [];
+  const targetOutSize = getOutputConfigSpec(targetOutputConfig).outputSize;
   for (const demo of demos) {
     for (const f of demo.frames) {
-      allFrames.push(f);
+      const paddedInputs =
+        f.inputs.length === 108
+          ? f.inputs
+          : f.inputs.length < 108
+          ? [...f.inputs, ...new Array<number>(108 - f.inputs.length).fill(0)]
+          : f.inputs.slice(0, 108);
+      allFrames.push({
+        inputs: paddedInputs,
+        target: mapDemoActionToTargetConfig(f, demo.envSummary.outputConfig, targetOutputConfig, targetOutSize),
+      });
     }
   }
 
@@ -196,6 +398,13 @@ export function trainNetworkOnDemos(
   }
 
   const net = baseNet.clone();
+  if (net.getInputSize() !== 108) {
+    net.resizeInputSize(108);
+  }
+  if (net.getOutputSize() !== targetOutSize) {
+    net.resizeOutputSize(targetOutSize, false);
+  }
+  const outSize = net.getOutputSize();
   const numLayers = net.weights.length;
 
   // Adam optimizer moment buffers
@@ -207,6 +416,8 @@ export function trainNetworkOnDemos(
   const gradW: number[][][] = net.weights.map((l) => l.map((r) => r.map(() => 0)));
   const gradB: number[][] = net.biases.map((l) => l.map(() => 0));
 
+  const dirIndices: [number, number] = targetOutputConfig === 'polar_3d' ? [1, 2] : [0, 1];
+
   const evalDataset = (): { mse: number; dirAccPct: number } => {
     let totalSq = 0;
     let dirMatch = 0;
@@ -214,16 +425,44 @@ export function trainNetworkOnDemos(
 
     for (const f of allFrames) {
       const out = net.forwardOnly(f.inputs);
-      const dx = out[0] - f.action[0];
-      const dy = out[1] - f.action[1];
-      totalSq += 0.5 * (dx * dx + dy * dy);
+      let sq = 0;
+      for (let k = 0; k < outSize; k++) {
+        const d = (out[k] ?? 0) - (f.target[k] ?? 0);
+        sq += d * d;
+      }
+      totalSq += sq / outSize;
 
-      const tMag = Math.hypot(f.action[0], f.action[1]);
-      const pMag = Math.hypot(out[0], out[1]);
+      let t0 = 0;
+      let t1 = 0;
+      let p0 = 0;
+      let p1 = 0;
+      if (targetOutputConfig === 'thrusters_4d') {
+        t0 = Math.max(0, f.target[0] ?? 0) - Math.max(0, f.target[1] ?? 0);
+        t1 = Math.max(0, f.target[2] ?? 0) - Math.max(0, f.target[3] ?? 0);
+        p0 = Math.max(0, out[0] ?? 0) - Math.max(0, out[1] ?? 0);
+        p1 = Math.max(0, out[2] ?? 0) - Math.max(0, out[3] ?? 0);
+      } else if (targetOutputConfig === 'compass_2d') {
+        const tSpd = Math.max(0, ((f.target[1] ?? -1) + 1) * 0.5);
+        const pSpd = Math.max(0, ((out[1] ?? -1) + 1) * 0.5);
+        const tAng = (f.target[0] ?? 0) * Math.PI;
+        const pAng = (out[0] ?? 0) * Math.PI;
+        t0 = Math.cos(tAng) * tSpd;
+        t1 = Math.sin(tAng) * tSpd;
+        p0 = Math.cos(pAng) * pSpd;
+        p1 = Math.sin(pAng) * pSpd;
+      } else {
+        const [i0, i1] = dirIndices;
+        t0 = f.target[i0] ?? 0;
+        t1 = f.target[i1] ?? 0;
+        p0 = out[i0] ?? 0;
+        p1 = out[i1] ?? 0;
+      }
+      const tMag = Math.hypot(t0, t1);
+      const pMag = Math.hypot(p0, p1);
       if (tMag > 0.15) {
         movingFrames++;
         if (pMag > 0.08) {
-          const cos = (out[0] * f.action[0] + out[1] * f.action[1]) / (pMag * tMag);
+          const cos = (p0 * t0 + p1 * t1) / (pMag * tMag);
           if (cos >= 0.7) dirMatch++;
         }
       } else {
@@ -305,15 +544,15 @@ export function trainNetworkOnDemos(
         }
 
         const pred = activations[numLayers];
-        const err0 = pred[0] - frame.action[0];
-        const err1 = pred[1] - frame.action[1];
-        epochLoss += 0.5 * (err0 * err0 + err1 * err1);
-
-        // Output delta (MSE wrt tanh output)
-        let deltas: number[] = [
-          err0 * (1 - pred[0] * pred[0]),
-          err1 * (1 - pred[1] * pred[1]),
-        ];
+        let deltas: number[] = new Array<number>(outSize);
+        let sampleSq = 0;
+        for (let k = 0; k < outSize; k++) {
+          const p = pred[k] ?? 0;
+          const err = p - (frame.target[k] ?? 0);
+          sampleSq += err * err;
+          deltas[k] = err * (1 - p * p);
+        }
+        epochLoss += sampleSq / outSize;
 
         for (let l = numLayers - 1; l >= 0; l--) {
           const prevAct = activations[l];
